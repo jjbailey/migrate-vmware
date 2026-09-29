@@ -27,3 +27,16 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   ```
 
 ## Coming soon
+
+## doc/
+
+- [workflow.md](doc/workflow.md) - Describes the per-target migration run
+  (snapshot, clone, OVA export, manifest generation), the migration catalog,
+  and artifact retention/cleanup behavior on success and failure. Includes a
+  Mermaid flowchart of the AWS/OpenStack/GCP run paths.
+- [workflow.svg](doc/workflow.svg) - Rendered version of the flowchart in
+  `workflow.md`.
+- [migrate_vmware_presentation.pptx](doc/migrate_vmware_presentation.pptx) -
+  Slide deck presenting the migration workflow.
+- [migrate_vmware_presentation.mp4](doc/migrate_vmware_presentation.mp4) -
+  Recorded narration of the presentation deck.
