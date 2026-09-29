@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="900" viewBox="0 0 2400 900">
+  <rect width="2400" height="900" fill="#f7fafc"/>
+  <style>
+    .title { font: 700 42px Arial, sans-serif; fill: #17212b; }
+    .subtitle { font: 24px Arial, sans-serif; fill: #52606d; }
+    .head { font: 700 25px Arial, sans-serif; fill: #ffffff; letter-spacing: 1px; }
+    .label { font: 700 28px Arial, sans-serif; fill: #17212b; }
+    .body { font: 24px Arial, sans-serif; fill: #263746; }
+    .small { font: 21px Arial, sans-serif; fill: #52606d; }
+    .box { stroke: #1769aa; stroke-width: 3; rx: 18; }
+    .target { stroke: #218c74; stroke-width: 3; rx: 18; }
+    .arrow { stroke: #52606d; stroke-width: 6; fill: none; marker-end: url(#arrow); }
+  </style>
+  <defs>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="11" refY="5" orient="auto">
+      <path d="M0,0 L12,5 L0,10 Z" fill="#52606d"/>
+    </marker>
+  </defs>
+
+  <text x="90" y="75" class="title">VMware Migration Workflow</text>
+  <text x="90" y="115" class="subtitle">Each target run exports from vSphere, reusing the same task pipeline.</text>
+
+  <rect x="90" y="190" width="430" height="470" class="box" fill="#e8f2fa"/>
+  <rect x="90" y="190" width="430" height="70" rx="18" fill="#1769aa"/>
+  <text x="125" y="235" class="head">VSPHERE SOURCE</text>
+  <text x="125" y="325" class="label">Running VM</text>
+  <text x="125" y="372" class="body">Snapshot and clone</text>
+  <text x="125" y="430" class="label">Source stays online</text>
+  <text x="125" y="477" class="body">Non-disruptive handoff</text>
+  <text x="125" y="558" class="small">vSphere metadata inputs</text>
+  <text x="125" y="598" class="small">Disks and source MACs</text>
+
+  <path d="M520 425 H665" class="arrow"/>
+
+  <rect x="665" y="190" width="490" height="470" class="box" fill="#eef6fb"/>
+  <rect x="665" y="190" width="490" height="70" rx="18" fill="#1769aa"/>
+  <text x="700" y="235" class="head">SHARED TASK PIPELINE</text>
+  <text x="700" y="325" class="label">Per-target run</text>
+  <text x="700" y="370" class="body">Snapshot, clone, export OVA</text>
+  <text x="700" y="435" class="label">Inspect</text>
+  <text x="700" y="480" class="body">Manifest + target preparation</text>
+  <text x="700" y="545" class="label">Trace</text>
+  <text x="700" y="590" class="body">Run ID + disk manifest</text>
+
+  <path d="M1155 425 H1310" class="arrow"/>
+
+  <rect x="1310" y="125" width="970" height="600" class="target" fill="#eef9f6"/>
+  <rect x="1310" y="125" width="970" height="70" rx="18" fill="#218c74"/>
+  <text x="1345" y="170" class="head">SELECTED NATIVE CLOUD LANDING</text>
+  <text x="1345" y="245" class="subtitle">Destination logic stays at the boundary.</text>
+
+  <rect x="1360" y="305" width="270" height="285" class="target" fill="#ffffff"/>
+  <text x="1400" y="370" class="label">AWS</text>
+  <text x="1400" y="430" class="body">S3 → AMI</text>
+  <text x="1400" y="480" class="small">Import image</text>
+  <text x="1400" y="520" class="small">Launch instance</text>
+
+  <rect x="1660" y="305" width="270" height="285" class="target" fill="#ffffff"/>
+  <text x="1700" y="370" class="label">OpenStack</text>
+  <text x="1700" y="430" class="body">QCOW2 → Glance</text>
+  <text x="1700" y="480" class="small">Boot image + volumes</text>
+  <text x="1700" y="520" class="small">Launch server</text>
+
+  <rect x="1960" y="305" width="270" height="285" class="target" fill="#ffffff"/>
+  <text x="2000" y="370" class="label">Google Cloud</text>
+  <text x="2000" y="430" class="body">GCS → M2VM</text>
+  <text x="2000" y="480" class="small">Compute images</text>
+  <text x="2000" y="520" class="small">Launch VM</text>
+
+  <path d="M1795 245 V290" class="arrow"/>
+  <text x="90" y="815" class="subtitle">Each migration selects one target; all targets reuse the same vSphere task implementation.</text>
+</svg>
