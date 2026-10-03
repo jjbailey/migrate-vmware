@@ -26,7 +26,9 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   ovftool --version
   ```
 
-## Coming soon
+## One-time Setup
+
+Coming soon pending further testing...
 
 ## doc/
 

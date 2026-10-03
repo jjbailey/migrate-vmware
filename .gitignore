@@ -1,0 +1,19 @@
+*.ova
+# ovftool zip must be downloaded by the user - never commit it (license forbids redistribution)
+VMware-ovftool-*.zip
+
+
+# Ansible local cache
+.ansible/
+
+# Runtime lock files created by the catalog append helpers
+catalogs/*.lock
+
+# Editor and OS cruft
+*~
+.*.sw[op]
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
