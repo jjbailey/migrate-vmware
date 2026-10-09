@@ -14,13 +14,13 @@ preserve network identity.
 flowchart LR
     VM["VMware"]
 
-    subgraph RUNS["Separate target runs"]
+    subgraph RUNS["Separate Target Runs"]
         AWSRUN["Snapshot / clone / export<br/>AWS run"]
         OSRUN["Snapshot / clone / export<br/>OpenStack run"]
         GCPRUN["Snapshot / clone / export<br/>GCP run"]
     end
 
-    subgraph LANDINGS["Native cloud landings"]
+    subgraph LANDINGS["Native Cloud Landings"]
         AWS["S3 → AMI"]
         OS["QCOW2 → Glance / Cinder"]
         GCP["GCS → M2VM images"]

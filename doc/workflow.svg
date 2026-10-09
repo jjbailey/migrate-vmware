@@ -52,8 +52,8 @@
   <rect x="1360" y="305" width="270" height="285" class="target" fill="#ffffff"/>
   <text x="1400" y="370" class="label">AWS</text>
   <text x="1400" y="430" class="body">S3 → AMI</text>
-  <text x="1400" y="480" class="small">Import image</text>
-  <text x="1400" y="520" class="small">Launch instance</text>
+  <text x="1400" y="480" class="small">Import Image</text>
+  <text x="1400" y="520" class="small">Launch Instance</text>
 
   <rect x="1660" y="305" width="270" height="285" class="target" fill="#ffffff"/>
   <text x="1700" y="370" class="label">OpenStack</text>
@@ -64,7 +64,7 @@
   <rect x="1960" y="305" width="270" height="285" class="target" fill="#ffffff"/>
   <text x="2000" y="370" class="label">Google Cloud</text>
   <text x="2000" y="430" class="body">GCS → M2VM</text>
-  <text x="2000" y="480" class="small">Compute images</text>
+  <text x="2000" y="480" class="small">Compute Images</text>
   <text x="2000" y="520" class="small">Launch VM</text>
 
   <path d="M1795 245 V290" class="arrow"/>
