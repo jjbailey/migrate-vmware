@@ -61,9 +61,9 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   `openstacksdk`, `google-auth`, `requests`, and `PyYAML`.
   `govc` should be installed as `/usr/local/bin/govc` or otherwise available
   on `PATH`.
-- `dialog` or `whiptail` is required only for the interactive launch dialogs
-  (`bin/launch-aws-dialog.sh`, `bin/launch-gcp-dialog.sh`, and
-  `bin/launch-openstack-dialog.sh`) and should be available on `PATH`.
+- `dialog` or `whiptail` is required only for the interactive dialogs
+  (`bin/*-dialog.sh`; see [Interactive Dialogs](#interactive-dialogs)) and
+  should be available on `PATH`.
 
 ## One-time Setup
 
@@ -77,7 +77,7 @@ ovftool --version
 qemu-img --version   # OpenStack migrations
 gcloud --version     # GCP migrations
 aws --version        # AWS migrations
-command -v dialog || command -v whiptail   # launch dialogs only
+command -v dialog || command -v whiptail   # interactive dialogs only
 ```
 
 The vault helpers (`bin/*-vault.sh`) prefer the `ansible-vault` in
@@ -497,16 +497,64 @@ Migration wrappers default their artifact root to `/work/migrate-vmware` and
 accept `ARTIFACT_ROOT` to override it. The wrappers are useful when you want the
 playbook runner, vault handling, and verbosity applied consistently.
 
-The interactive `bin/migrate-aws-dialog.sh`, `bin/migrate-gcp-dialog.sh`, and
-`bin/migrate-openstack-dialog.sh` save the default migration artifact root as
-`/work/migrate-vmware` in generated scripts. Set `ARTIFACT_ROOT` before starting
-a dialog when the artifacts belong on another filesystem. The interactive
-`bin/launch-aws-dialog.sh`, `bin/launch-gcp-dialog.sh`, and
-`bin/launch-openstack-dialog.sh` build the equivalent `bin/` launch wrapper
-command without requiring environment variables to be entered manually. The
-generated file calls the wrapper by absolute path, so it can be saved and run
-from any directory. Ready-to-run command examples (OpenStack networking matrix, AWS, GCP,
+The interactive `bin/*-dialog.sh` front ends build these wrapper commands for
+you; see [Interactive Dialogs](#interactive-dialogs). Ready-to-run command examples (OpenStack networking matrix, AWS, GCP,
 migrate, and reconcile) are collected in
+[examples/README.md](examples/README.md).
+
+## Interactive Dialogs
+
+Six `bin/` scripts are guided front ends for the platform wrappers. They ask
+for the settings the wrappers otherwise read from environment variables,
+generate the equivalent wrapper command, and let you review, save, or run it.
+Nothing runs until you confirm at the end.
+
+| Dialog                            | Generates a call to                |
+| --------------------------------- | ---------------------------------- |
+| `bin/migrate-aws-dialog.sh`       | `bin/migrate-aws-vm.sh`            |
+| `bin/migrate-gcp-dialog.sh`       | `bin/migrate-gcp-vm.sh`            |
+| `bin/migrate-openstack-dialog.sh` | `bin/migrate-openstack-vm.sh`      |
+| `bin/launch-aws-dialog.sh`        | `bin/launch-aws-instance.sh`       |
+| `bin/launch-gcp-dialog.sh`        | `bin/launch-gcp-instance.sh`       |
+| `bin/launch-openstack-dialog.sh`  | `bin/launch-openstack-instance.sh` |
+
+Requirements: `dialog` (preferred) or `whiptail`, and an interactive terminal
+of at least 20x10 (run the script directly, not through a pipe or redirect).
+
+What each kind asks:
+
+- **Migrate dialogs** pick the source vCenter and the target AWS account, GCP
+  project, or OpenStack project from the keys in the matching vault, then ask
+  for the source VM name, an optional certificate-validation override
+  (`VALIDATE_CERTS`), and whether to quiesce the snapshot
+  (`QUIESCE_SNAPSHOT`). Without a selected vCenter they also ask for the legacy
+  `VCENTER_DATACENTER` override.
+- **Launch dialogs** pick the target project the same way and offer the
+  migrated VM from `catalogs/migration-catalog.json` (newest completed
+  migration for that platform first; a name can also be typed). They then ask
+  for the platform's launch settings: subnet, security groups, instance type
+  and key pair for AWS; zone, machine type, network, tags, external IP and
+  optional SSH key for GCP; and IP, MAC, floating IP, security group,
+  config-drive, user-data, flavor, key pair, and network choices for OpenStack
+  (see [OpenStack Launch Networking](#openstack-launch-networking)).
+
+Target choices are read from the vault with `ansible-vault view`, using
+`VAULT_PASSWORD_FILE` or `~/.ssh/dib-vault-pass`. If the password file or
+`ansible-vault` is unavailable, the dialog falls back to typing the name; leave
+it blank to let the playbook auto-select a single-entry vault.
+
+At the end the dialog offers three steps: review the generated command, save it
+(default `./migrate-<vm>.sh` or `./launch-<vm>.sh`), and run it now. The
+generated script is a short shell file of `export` lines followed by the
+wrapper's absolute path, so a saved copy can be run from any directory. An
+unsaved command is left in `/tmp`. Cancelling at any prompt, or pressing Esc,
+exits with "Nothing was run."
+
+The migrate dialogs write `ARTIFACT_ROOT` into the script, defaulting to
+`/work/migrate-vmware`; set `ARTIFACT_ROOT` before starting a dialog when the
+artifacts belong on another filesystem. The shared widgets and the
+terminal handling live in `bin/launch-dialog-common.sh`, which every dialog
+sources. Ready-to-run examples are collected in
 [examples/README.md](examples/README.md).
 
 ## Development and Validation
