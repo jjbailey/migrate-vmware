@@ -50,6 +50,7 @@ The playbooks run directly on the control host using Ansible, `govc`, and
     cloudbuild.googleapis.com \
     --project=my-project-id
   ```
+
 - Network access from the control host to vCenter and the selected cloud APIs.
 - Ansible, the `amazon.aws`, `community.vmware`, and
   `openstack.cloud` collections, `govc`, `gcloud`, the AWS CLI (`aws`),
@@ -563,6 +564,8 @@ The helpers are symlinks to `bin/edit-vault.sh`; set `VAULT=<path>` and run
 `ansible-vault edit vaults/aws.yml --vault-password-file ~/.ssh/dib-vault-pass`
 works too.
 
+See [doc/vaults.md](doc/vaults.md) for the vault file layouts in one place.
+
 - **`vaults/vsphere.yml`** - `vsphere_projects`, a mapping of vCenter key to
   a vCenter entry: `vcenter_hostname`, `vcenter_username`, `vcenter_password`,
   optional `datacenter` (falls back to the pre-existing `datacenter`
@@ -721,7 +724,7 @@ works too.
 
   `gcp_import_location` is the region the Migrate to Virtual Machines _import
   job_ runs in - the value passed to `gcloud compute migration image-imports
-  --location`. It does **not** control where `gcs_bucket` lives (fixed when
+--location`. It does **not** control where `gcs_bucket` lives (fixed when
   the bucket is created; the import reads the staged QCOW2 across regions) or
   where the finished image lives (a GCE Compute image is a _global_ resource).
   It only picks which region does the conversion, so it can be changed freely,

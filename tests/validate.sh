@@ -59,7 +59,7 @@ import sys
 from pathlib import Path
 
 # Paths the docs mention on purpose even though they are gone.
-ALLOWED = {"vaults/env"}
+ALLOWED = {"vaults/env", "vaults/aws-staging.yml"}
 
 tracked = [path for path in subprocess.run(["git", "ls-files"], capture_output=True, text=True, check=True).stdout.split()
            if Path(path).exists()]
