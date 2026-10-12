@@ -1,0 +1,48 @@
+---
+# playbooks/tasks/migration/aws/preflight.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# AWS credentials and prerequisites.
+
+- name: Select the AWS project for this run
+  ansible.builtin.import_tasks: select-project.yml
+
+- name: Check for a local AWS credentials file fallback
+  ansible.builtin.stat:
+    path: "{{ '~/.aws/credentials' | expanduser }}"
+  register: aws_cred_file
+
+- name: Warn if AWS credentials are neither in the vault nor in ~/.aws
+  ansible.builtin.debug:
+    msg: >-
+      No AWS credentials resolved: vaults/aws.yml has empty access keys and
+      ~/.aws/credentials is absent. AWS tasks will fail unless an instance
+      profile provides credentials.
+  when:
+    - aws_task_env | length == 0
+    - not aws_cred_file.stat.exists
+
+- name: Check the AWS CLI
+  # tasks/migration/aws/import.yml stages the OVA with "aws s3 cp" for its
+  # multipart upload, so the CLI is required alongside the collection.
+  ansible.builtin.command:
+    argv: [aws, --version]
+  register: aws_cli_check
+  failed_when: aws_cli_check.rc != 0
+  changed_when: false
+
+# this throws a harmless deprecation warning
+- name: Confirm the vmimport role exists
+  amazon.aws.iam_role_info:
+    name: "{{ vmimport_role_name }}"
+    region: "{{ aws_region }}"
+  register: vmimport_role_info
+  failed_when: vmimport_role_info.iam_roles | length == 0
+
+- name: Confirm the S3 staging bucket exists
+  amazon.aws.s3_bucket_info:
+    name: "{{ s3_bucket }}"
+    region: "{{ aws_region }}"
+  register: aws_staging_bucket_info
+  failed_when: aws_staging_bucket_info.buckets | length == 0
+

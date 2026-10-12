@@ -1,0 +1,161 @@
+---
+# playbooks/tasks/migration/common/select-vcenter.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Resolve one vCenter from the multi-vCenter vault.
+#
+# vaults/vsphere.yml holds every vCenter at once so no vault swap is needed:
+#
+#   vsphere_projects:
+#     example:
+#       vcenter_hostname: "vc.example.com"
+#       vcenter_username: "administrator@example.com"
+#       vcenter_password: "my-password"
+#       datacenter: "Datacenter"   # optional; falls back to the pre-existing
+#                                  # `datacenter` variable (default "Datacenter")
+#       validate_certs: false      # optional; one TLS knob per entry governing
+#                                  # the vmware modules, ovftool, and govc
+#     other-site:
+#       ...
+#
+# -e vsphere_target_vcenter=<name> matches a vault key or a vcenter_hostname.
+# A legacy single-vCenter vault holding only the flat
+# vcenter_hostname/vcenter_username/vcenter_password plus GOVC_* keys still
+# works unmodified: with no explicit target the legacy credentials are used
+# as-is even when vsphere_projects is also present. A single-entry
+# vsphere_projects map is auto-selected when nothing is requested; several
+# entries with no request (and no legacy credentials) fail and ask for
+# -e vsphere_target_vcenter.
+#
+# Outputs: vcenter_hostname/vcenter_username/vcenter_password, datacenter,
+# validate_certs, the GOVC_URL/GOVC_USERNAME/GOVC_PASSWORD/GOVC_INSECURE
+# variables expected by the legacy preflight assertions, the
+# govc_url/govc_username/govc_password/govc_insecure mappings used by the
+# govc/ovftool tasks, and vsphere_target_name (the vault key, or "legacy"
+# when the flat credentials were used).
+
+- name: Include the vSphere vault variables
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../vaults/vsphere.yml"
+  no_log: true
+
+- name: Determine whether a target vCenter was explicitly requested
+  ansible.builtin.set_fact:
+    vsphere_target_vcenter_explicit: "{{ vsphere_target_vcenter is defined and (vsphere_target_vcenter | string | trim | length > 0) }}"
+    vsphere_target_vcenter_requested: "{{ (vsphere_target_vcenter | string | trim) if vsphere_target_vcenter is defined else '' }}"
+
+- name: Index vSphere projects by stringified key
+  ansible.builtin.set_fact:
+    vsphere_projects_by_key: "{{ vsphere_projects_by_key | default({}) | combine({(item.key | string): item.value}) }}"
+  loop: "{{ vsphere_projects | default({}) | dict2items }}"
+  when: vsphere_projects is defined
+  no_log: true
+
+- name: Select the credentials for the requested vCenter
+  ansible.builtin.set_fact:
+    vsphere_selected_entry: "{{ item.value }}"
+    vsphere_target_name: "{{ item.key }}"
+    vsphere_auth_from_map: true
+  loop: "{{ vsphere_projects_by_key | default({}) | dict2items }}"
+  when:
+    - vsphere_target_vcenter_explicit | bool
+    - vsphere_target_name is not defined
+    - vsphere_target_vcenter_requested in [item.key, (item.value.vcenter_hostname | default('') | string)]
+    - vsphere_auth_from_map is not defined
+  no_log: true
+
+- name: Fail when the requested vCenter matches nothing in the vault
+  ansible.builtin.fail:
+    msg: >-
+      vCenter '{{ vsphere_target_vcenter_requested }}' matches no vault key
+      or vcenter_hostname in vaults/vsphere.yml under vsphere_projects.
+      Available: {{ vsphere_projects_by_key | default({}) | list | join(', ') or '<none>' }}.
+  when:
+    - vsphere_target_vcenter_explicit | bool
+    - vsphere_target_name is not defined
+
+- name: Record the legacy target when none was requested
+  ansible.builtin.set_fact:
+    vsphere_target_name: legacy
+    vsphere_auth_from_map: false
+  when:
+    - not (vsphere_target_vcenter_explicit | bool)
+    - vsphere_target_name is not defined
+    - vcenter_hostname is defined
+    - (vcenter_hostname | string | trim | length > 0)
+
+- name: Auto-select the only vault vCenter when none was requested
+  ansible.builtin.set_fact:
+    vsphere_selected_entry: "{{ (vsphere_projects_by_key | dict2items | first).value }}"
+    vsphere_target_name: "{{ (vsphere_projects_by_key | dict2items | first).key }}"
+    vsphere_auth_from_map: true
+  when:
+    - not (vsphere_target_vcenter_explicit | bool)
+    - vsphere_target_name is not defined
+    - vsphere_projects_by_key is defined
+    - vsphere_projects_by_key | length == 1
+  no_log: true
+
+- name: Fail when no vCenter is selected
+  ansible.builtin.fail:
+    msg: >-
+      No vCenter selected. Pass -e vsphere_target_vcenter=<name> matching a
+      key or vcenter_hostname in vsphere_projects, or define the legacy flat
+      vcenter_hostname/vcenter_username/vcenter_password credentials.
+  when: vsphere_target_name is not defined or vsphere_target_name | length == 0
+
+- name: Promote the selected map entry to the module credentials
+  ansible.builtin.set_fact:
+    vcenter_hostname: "{{ vsphere_selected_entry.vcenter_hostname | string }}"
+    vcenter_username: "{{ vsphere_selected_entry.vcenter_username | string }}"
+    vcenter_password: "{{ vsphere_selected_entry.vcenter_password | string }}"
+    validate_certs: "{{ vsphere_selected_entry.validate_certs | default(true) | bool }}"
+    datacenter: "{{ (vsphere_selected_entry.datacenter | default(datacenter | default('Datacenter'))) | string }}"
+  when: vsphere_auth_from_map | default(false) | bool
+  no_log: true
+
+- name: Assert the vCenter credentials exist
+  ansible.builtin.assert:
+    that:
+      - vcenter_hostname is defined and vcenter_hostname | length > 0
+      - vcenter_username is defined and (vcenter_username | string | trim | length) > 0
+      - vcenter_password is defined and (vcenter_password | string | trim | length) > 0
+    fail_msg: >-
+      vaults/vsphere.yml must define the legacy flat vcenter_hostname,
+      vcenter_username, and vcenter_password, or a vsphere_projects entry
+      with the same keys.
+  no_log: true
+
+- name: Derive the GOVC and govc settings from the selected vCenter
+  ansible.builtin.set_fact:
+    GOVC_URL: "https://{{ vcenter_hostname }}/sdk"
+    GOVC_USERNAME: "{{ vcenter_username }}"
+    GOVC_PASSWORD: "{{ vcenter_password }}"
+    GOVC_INSECURE: "{{ (vsphere_selected_entry.govc_insecure | default('1' if not (validate_certs | bool) else '0')) | string }}"
+    govc_url: "https://{{ vcenter_hostname }}/sdk"
+    govc_username: "{{ vcenter_username }}"
+    govc_password: "{{ vcenter_password }}"
+    govc_insecure: "{{ (vsphere_selected_entry.govc_insecure | default('1' if not (validate_certs | bool) else '0')) | string }}"
+  when: vsphere_auth_from_map | default(false) | bool
+  no_log: true
+
+- name: Derive the legacy GOVC settings when the flat credentials were used
+  ansible.builtin.set_fact:
+    GOVC_URL: "https://{{ vcenter_hostname }}/sdk"
+    GOVC_USERNAME: "{{ vcenter_username }}"
+    GOVC_PASSWORD: "{{ vcenter_password }}"
+    govc_url: "https://{{ vcenter_hostname }}/sdk"
+    govc_username: "{{ vcenter_username }}"
+    govc_password: "{{ vcenter_password }}"
+  when: not (vsphere_auth_from_map | default(false) | bool)
+  no_log: true
+
+- name: Derive the legacy govc TLS policy when the flat credentials were used
+  ansible.builtin.set_fact:
+    # An unmodified pre-multi-vCenter vault may still carry an explicit
+    # GOVC_INSECURE; it wins over the value derived from validate_certs.
+    GOVC_INSECURE: "{{ (GOVC_INSECURE | default('1' if not ((validate_certs | default(true)) | bool) else '0')) | string }}"
+    govc_insecure: "{{ (GOVC_INSECURE | default('1' if not ((validate_certs | default(true)) | bool) else '0')) | string }}"
+  when: not (vsphere_auth_from_map | default(false) | bool)
+  no_log: true
+

@@ -1,0 +1,292 @@
+---
+# playbooks/launch-gcp-instance.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Launch a Compute Engine instance from the latest completed GCP migration.
+# The boot image becomes the instance boot disk. Migrated data images are
+# materialized as zonal persistent disks and attached to the instance.
+
+- name: Launch a GCP instance from a migrated VM
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    vm_name: "my-vm"
+    instance_name: ""
+    gcp_project: ""
+    gcp_zone: "us-central1-a"
+    gcp_machine_type: "e2-standard-2"
+    gcp_network: "default"
+    gcp_subnetwork: ""
+    gcp_tags: []
+    gcp_no_address: false
+    # Optional extra key for one launch, injected as instance ssh-keys
+    # metadata. cloud-init merges it with the project's ssh-keys metadata, which
+    # is where the standing key belongs, so this is normally left empty.
+    #
+    # cloud-init's GCE datasource only accepts ssh-keys entries prefixed with
+    # 'cloudinit' or the image's default user, and drops every other prefix --
+    # including 'root'. 'cloudinit' is the distro-agnostic choice; cc_ssh then
+    # applies the key to the default user and, because the image sets
+    # disable_root: false, to root as well.
+    gcp_ssh_user: "cloudinit"
+    gcp_ssh_public_key_file: ""
+    gcp_disk_type: "pd-balanced"
+    gcp_boot_image_name: ""
+    gcp_data_image_names: []
+    gcp_migration_id: ""
+    migration_catalog_path: "{{ playbook_dir }}/../catalogs/migration-catalog.json"
+    deployment_catalog_path: "{{ playbook_dir }}/../catalogs/deployment-catalog.json"
+
+  tasks:
+    # Bare -e key=[...] arrives as a string, and Ansible extra-vars cannot be
+    # overridden by set_fact. Decode list-shaped inputs into the `gcp` mapping
+    # (not an extra-var) and use gcp.* for the rest of this play. Same idiom as
+    # the OpenStack launch play.
+    - name: Normalize GCP list-shaped extra-vars
+      ansible.builtin.set_fact:
+        gcp:
+          tags: "{{ gcp_tags | from_yaml if (gcp_tags is string) else gcp_tags }}"
+
+    # gcloud parses --metadata as a comma-separated key=value list, and these
+    # values are interpolated into it, so a comma would corrupt the list. The
+    # instance name is sanitized separately; vm_name is recorded verbatim.
+    - name: Reject a VM name that would corrupt the instance metadata list
+      ansible.builtin.assert:
+        that:
+          - "',' not in vm_name"
+        fail_msg: >-
+          vm_name must not contain a comma; it is recorded verbatim in the
+          instance's MigratedFrom metadata, which gcloud parses as a
+          comma-separated list.
+
+    - name: Require normalized GCP list inputs
+      ansible.builtin.assert:
+        that:
+          - gcp.tags is sequence
+          - gcp.tags is not string
+        fail_msg: >-
+          gcp_tags must be a list. Pass it as JSON, either
+          -e '{"gcp_tags": ["web","db"]}' or -e gcp_tags='["web","db"]'.
+
+    - block:
+        - name: Select the GCP project for this run
+          ansible.builtin.include_tasks: tasks/migration/gcp/select-project.yml
+
+        - name: Derive a valid GCP instance name
+          ansible.builtin.set_fact:
+            gcp_instance_name: >-
+              {{ (instance_name if (instance_name | length > 0) else vm_name)
+                 | lower | regex_replace('[^a-z0-9-]', '-')
+                 | regex_replace('^-+|-+$', '') }}
+            gcp_data_disk_names: []
+
+        - name: Give an all-symbolic VM name a valid GCP prefix
+          ansible.builtin.set_fact:
+            gcp_instance_name: "{{ 'vm-' ~ gcp_instance_name if (gcp_instance_name | length == 0 or gcp_instance_name is match('^[0-9]')) else gcp_instance_name }}"
+
+        - name: Trim the GCP instance name to its limit
+          ansible.builtin.set_fact:
+            gcp_instance_name: "{{ gcp_instance_name[:63] | regex_replace('-+$', '') }}"
+
+        - name: Look up the latest completed GCP migration
+          when: gcp_boot_image_name | length == 0
+          block:
+            - name: Query the GCP migration catalog
+              ansible.builtin.command:
+                argv:
+                  - python3
+                  - "{{ playbook_dir }}/../bin/lookup-migration-gcp.py"
+                  - --catalog
+                  - "{{ migration_catalog_path }}"
+                  - --vm-name
+                  - "{{ vm_name }}"
+                  - --project
+                  - "{{ gcp_target_project_name }}"
+              register: gcp_migration_lookup
+              changed_when: false
+
+            - name: Resolve GCP image names from the catalog
+              ansible.builtin.set_fact:
+                gcp_project: "{{ (gcp_migration_lookup.stdout | from_json).gcp_project }}"
+                gcp_boot_image_name: "{{ (gcp_migration_lookup.stdout | from_json).gcp_boot_image_name }}"
+                gcp_data_image_names: "{{ (gcp_migration_lookup.stdout | from_json).gcp_data_image_names }}"
+                gcp_migration_id: "{{ (gcp_migration_lookup.stdout | from_json).migration_id }}"
+
+        - name: Require a boot image
+          ansible.builtin.assert:
+            that:
+              - gcp_boot_image_name | length > 0
+              - gcp_project | length > 0
+            fail_msg: "Provide gcp_boot_image_name or run migrate-gcp-vm.yml first."
+
+        - name: Create a temporary file for the service account key
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .json
+          register: gcp_sa_key_file
+
+        - name: Write the service account key to the temporary file
+          ansible.builtin.copy:
+            content: "{{ service_account_key }}"
+            dest: "{{ gcp_sa_key_file.path }}"
+            mode: "0600"
+          no_log: true
+
+        - name: Configure gcloud to use only the temporary service-account key
+          ansible.builtin.set_fact:
+            gcp_gcloud_env:
+              CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_sa_key_file.path }}"
+          no_log: true
+
+        - name: Read the SSH public key to inject through instance metadata
+          ansible.builtin.slurp:
+            src: "{{ gcp_ssh_public_key_file }}"
+          register: gcp_ssh_public_key_raw
+          when: gcp_ssh_public_key_file | length > 0
+
+        - name: Create a temporary file for the ssh-keys metadata
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .sshkeys
+          register: gcp_ssh_keys_file
+          when: gcp_ssh_public_key_file | length > 0
+
+        # ssh-keys goes in through --metadata-from-file because a public key
+        # contains spaces and may contain commas, which --metadata treats as an
+        # entry separator.
+        - name: Write the ssh-keys metadata value
+          ansible.builtin.copy:
+            content: "{{ gcp_ssh_user }}:{{ (gcp_ssh_public_key_raw.content | b64decode).strip() }}\n"
+            dest: "{{ gcp_ssh_keys_file.path }}"
+            mode: "0600"
+          when: gcp_ssh_public_key_file | length > 0
+
+        - name: Build the GCP instance creation arguments
+          ansible.builtin.set_fact:
+            gcp_instance_create_args: >-
+              {{ ['gcloud', 'compute', 'instances', 'create', gcp_instance_name,
+                  '--project=' ~ gcp_project, '--zone=' ~ gcp_zone,
+                  '--machine-type=' ~ gcp_machine_type,
+                  '--image=' ~ gcp_boot_image_name,
+                  '--image-project=' ~ gcp_project,
+                  '--network=' ~ gcp_network,
+                  '--metadata=MigratedFrom=' ~ vm_name ~ ',SourceMigrationId=' ~ (gcp_migration_id if (gcp_migration_id | length > 0) else 'manual'),
+                  '--quiet']
+                 + (['--subnet=' ~ gcp_subnetwork] if (gcp_subnetwork | length > 0) else [])
+                 + (['--tags=' ~ (gcp.tags | join(','))] if (gcp.tags | length > 0) else [])
+                 + (['--no-address'] if (gcp_no_address | bool) else [])
+                 + (['--metadata-from-file=ssh-keys=' ~ gcp_ssh_keys_file.path]
+                    if (gcp_ssh_public_key_file | length > 0) else []) }}
+
+        - name: Check whether the GCP instance already exists
+          ansible.builtin.command:
+            argv:
+              - gcloud
+              - compute
+              - instances
+              - describe
+              - "{{ gcp_instance_name }}"
+              - "--zone={{ gcp_zone }}"
+              - "--project={{ gcp_project }}"
+              - "--format=value(name)"
+          environment: "{{ gcp_gcloud_env }}"
+          register: gcp_instance_check
+          changed_when: false
+          failed_when: >-
+            gcp_instance_check.rc != 0 and
+            ('not found' not in (gcp_instance_check.stderr | lower)) and
+            ('does not exist' not in (gcp_instance_check.stderr | lower))
+
+        - name: Create the GCP instance
+          ansible.builtin.command:
+            argv: "{{ gcp_instance_create_args }}"
+          environment: "{{ gcp_gcloud_env }}"
+          when: gcp_instance_check.rc != 0
+          changed_when: true
+
+        - name: Report reuse of an existing GCP instance
+          ansible.builtin.debug:
+            msg: "Reusing existing GCP instance {{ gcp_instance_name }}."
+          when: gcp_instance_check.rc == 0
+
+        - name: Create and attach migrated GCP data disks
+          ansible.builtin.include_tasks: tasks/launch-gcp-data-disk.yml
+          loop: "{{ gcp_data_image_names }}"
+          loop_control:
+            loop_var: gcp_data_image
+            index_var: gcp_data_disk_index
+            label: "data image {{ gcp_data_disk_index + 1 }}"
+
+        - name: Describe the GCP instance
+          ansible.builtin.command:
+            argv:
+              - gcloud
+              - compute
+              - instances
+              - describe
+              - "{{ gcp_instance_name }}"
+              - "--zone={{ gcp_zone }}"
+              - "--project={{ gcp_project }}"
+              - --format=json
+          environment: "{{ gcp_gcloud_env }}"
+          register: gcp_instance_description
+          changed_when: false
+
+        - name: Display the GCP instance
+          ansible.builtin.debug:
+            msg: "{{ gcp_instance_description.stdout | from_json }}"
+
+        - name: Build the GCP deployment catalog entry
+          ansible.builtin.set_fact:
+            gcp_deployment_entry:
+              vm_name: "{{ vm_name }}"
+              target_platform: gcp
+              gcp_instance_name: "{{ gcp_instance_name }}"
+              gcp_project: "{{ gcp_project }}"
+              gcp_zone: "{{ gcp_zone }}"
+              gcp_machine_type: "{{ gcp_machine_type }}"
+              gcp_boot_image_name: "{{ gcp_boot_image_name }}"
+              gcp_data_disk_names: "{{ gcp_data_disk_names }}"
+              status: "RUNNING"
+              launched_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+        - name: Prepare the GCP deployment catalog entry
+          ansible.builtin.copy:
+            content: "{{ gcp_deployment_entry | to_json }}"
+            dest: "/tmp/.{{ gcp_instance_name }}.gcp-deployment-entry.json"
+            mode: "0600"
+
+        - name: Record the GCP deployment
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ playbook_dir }}/../bin/append-deployment-catalog.py"
+              - --catalog
+              - "{{ deployment_catalog_path }}"
+              - --entry
+              - "/tmp/.{{ gcp_instance_name }}.gcp-deployment-entry.json"
+          changed_when: true
+
+      always:
+        - name: Remove the temporary GCP deployment entry
+          ansible.builtin.file:
+            path: "/tmp/.{{ gcp_instance_name | default('gcp-instance') }}.gcp-deployment-entry.json"
+            state: absent
+          failed_when: false
+
+        - name: Remove the temporary service account key file
+          ansible.builtin.file:
+            path: "{{ gcp_sa_key_file.path }}"
+            state: absent
+          when: gcp_sa_key_file is defined and gcp_sa_key_file.path is defined
+          failed_when: false
+
+        - name: Remove the temporary ssh-keys metadata file
+          ansible.builtin.file:
+            path: "{{ gcp_ssh_keys_file.path }}"
+            state: absent
+          when: gcp_ssh_keys_file is defined and gcp_ssh_keys_file.path is defined
+          failed_when: false
+

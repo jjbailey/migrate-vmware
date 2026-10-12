@@ -1,0 +1,33 @@
+---
+# playbooks/tasks/migration/gcp/prepare-disks.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Settle the shared manifest, then validate the OVF disk files. GCP's Migrate
+# to Virtual Machines image-import API accepts VMDK input, so nothing is
+# converted here.
+
+- name: Settle the artifact manifest
+  ansible.builtin.import_tasks: ../common/load-manifest.yml
+
+- name: Verify exported OVF VMDK sizes
+  ansible.builtin.stat:
+    path: "{{ migration_run_dir }}/{{ item.path }}"
+  register: gcp_source_disk_stats
+  loop: "{{ artifact_manifest.disks }}"
+  loop_control:
+    label: "disk {{ item.index }}"
+
+- name: Reject missing or incomplete OVF VMDKs
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - artifact_manifest.disks[loop_index].file_size_bytes is none or
+        item.stat.size == (artifact_manifest.disks[loop_index].file_size_bytes | int)
+    fail_msg: >-
+      OVF disk {{ artifact_manifest.disks[loop_index].index }} is missing or
+      incomplete; delete the stale artifact and resume again.
+  loop: "{{ gcp_source_disk_stats.results }}"
+  loop_control:
+    index_var: loop_index
+    label: "disk {{ artifact_manifest.disks[loop_index].index }}"
+

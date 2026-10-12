@@ -1,0 +1,118 @@
+---
+# playbooks/tasks/migration/aws/import.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Stage and import the shared OVA artifact into AWS.
+
+- name: Verify the exported disk order before uploading
+  ansible.builtin.import_tasks: ../common/validate-disk-order.yml
+
+- name: Verify AWS will treat the boot disk as the root volume
+  # AWS VM Import picks the root volume from the order the descriptor lists
+  # its disks, and offers no way to say otherwise. Our boot disk must be the
+  # first one listed, or the AMI would boot from the wrong volume.
+  ansible.builtin.assert:
+    that:
+      - (artifact_manifest.disks[0].ovf_position | default(0)) == 0
+    fail_msg: >-
+      Boot disk {{ artifact_manifest.disks[0].disk_id }} is listed at position
+      {{ artifact_manifest.disks[0].ovf_position | default('?') }} in the OVF,
+      not first, so AWS would not import it as the root volume. Not uploading.
+  when: not (aws_allow_boot_order_mismatch | default(false) | bool)
+
+- name: Upload the OVA to the staging bucket
+  # The CLI uploads a multi-gigabyte OVA as parallel multipart chunks and
+  # resumes a failed part; s3_object pushes the whole file in one stream.
+  ansible.builtin.command:
+    argv:
+      - aws
+      - s3
+      - cp
+      - "{{ ova_local_path }}"
+      - "s3://{{ s3_bucket }}/{{ s3_key }}"
+      - "--region={{ aws_region }}"
+      - --only-show-errors
+  register: ova_upload
+  changed_when: true
+
+- name: Mark the AWS import for best-effort cleanup
+  ansible.builtin.set_fact:
+    aws_import_cleanup_required: true
+
+- name: Start the EC2 image import task
+  amazon.aws.ec2_import_image:
+    state: present
+    task_name: "{{ clone_name }}"
+    description: "Imported {{ vm_name }} via migrate-aws-vm.yml"
+    role_name: "{{ vmimport_role_name }}"
+    disk_containers:
+      - format: ova
+        description: "Imported from vSphere OVA (snapshot+clone)"
+        user_bucket:
+          s3_bucket: "{{ s3_bucket }}"
+          s3_key: "{{ s3_key }}"
+    region: "{{ aws_region }}"
+    # Omit this unless the source firmware is known. AWS supports both modes
+    # and can infer the mode when this optional parameter is absent.
+    boot_mode: "{{ aws_import_boot_mode | default(omit) }}"
+  register: import_start
+
+- name: Display the AWS import status
+  ansible.builtin.debug:
+    msg: >-
+      AWS VM Import/Export task started: task_id={{ import_start.import_image.import_task_id }},
+      status={{ import_start.import_image.status | default('active') }},
+      source=s3://{{ s3_bucket }}/{{ s3_key }}
+
+- name: Wait for the import task to complete
+  amazon.aws.ec2_import_image_info:
+    import_task_ids:
+      - "{{ import_start.import_image.import_task_id }}"
+    region: "{{ aws_region }}"
+  register: import_status
+  until: import_status.import_image[0].status in ['completed', 'deleted', 'cancelled']
+  retries: "{{ import_poll_retries }}"
+  delay: "{{ import_poll_delay }}"
+
+- name: Display the AWS import result
+  ansible.builtin.debug:
+    msg: >-
+      AWS VM Import/Export task {{ import_status.import_image[0].import_task_id }}
+      finished with status={{ import_status.import_image[0].status }},
+      ami_id={{ import_status.import_image[0].image_id | default('not assigned') }},
+      detail={{ import_status.import_image[0].status_message | default('none reported') }}
+
+- name: Fail if the import task did not complete successfully
+  ansible.builtin.fail:
+    msg: >-
+      Import task {{ import_start.import_image.import_task_id }} ended with
+      status {{ import_status.import_image[0].status }}:
+      {{ import_status.import_image[0].status_message | default('no message') }}
+  when: import_status.import_image[0].status != 'completed'
+
+- name: Verify AWS imported one snapshot per exported disk
+  ansible.builtin.assert:
+    that:
+      - import_status.import_image[0].snapshot_details | length == artifact_manifest.disks | length
+    fail_msg: >-
+      AWS imported {{ import_status.import_image[0].snapshot_details | length }}
+      snapshot(s) but the manifest has {{ artifact_manifest.disks | length }}
+      disk(s); the AMI's volumes do not match the exported disk order.
+  when: import_status.import_image[0].snapshot_details is defined
+
+- name: Mark the AWS import complete
+  ansible.builtin.set_fact:
+    aws_import_cleanup_required: false
+
+- name: Show the resulting AMI
+  ansible.builtin.debug:
+    msg: "{{ import_status.import_image[0] }}"
+
+- name: Tag the imported AMI with the source VM name
+  amazon.aws.ec2_tag:
+    resource: "{{ import_status.import_image[0].image_id }}"
+    region: "{{ aws_region }}"
+    state: present
+    tags:
+      Name: "{{ vm_name }}"
+

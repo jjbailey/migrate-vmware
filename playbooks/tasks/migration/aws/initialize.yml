@@ -1,0 +1,41 @@
+---
+# playbooks/tasks/migration/aws/initialize.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Stable AWS names and lifecycle state.
+
+- name: Generate the AWS migration run ID
+  ansible.builtin.set_fact:
+    migration_run_id: "{{ lookup('pipe', 'python3 -c \"import time; print(time.time_ns())\"') }}"
+    migration_resume_mode: false
+    migration_succeeded: false
+    aws_import_cleanup_required: false
+    snapshot_cleanup_required: false
+    clone_cleanup_required: false
+
+- name: Derive AWS artifact root and VM slug
+  ansible.builtin.set_fact:
+    aws_artifact_root: "{{ artifact_root | default('/var/tmp/migrate-vmware') }}"
+    aws_vm_slug: "{{ vm_name | regex_replace('[^A-Za-z0-9_.-]', '_') }}"
+
+- name: Derive the AWS migration artifact directory
+  ansible.builtin.set_fact:
+    aws_migration_run_dir: >-
+      {{ migration_run_dir | default(
+         aws_artifact_root ~ '/aws/' ~ aws_vm_slug ~ '/' ~ migration_run_id, true) }}
+
+- name: Derive AWS migration names and paths
+  ansible.builtin.set_fact:
+    snapshot_name: "ansible-export-snap-{{ migration_run_id }}"
+    clone_name: "{{ vm_name }}-aws-export-clone-{{ migration_run_id }}"
+    ova_local_path: "{{ aws_migration_run_dir }}/{{ vm_name }}-aws-export-clone-{{ migration_run_id }}.ova"
+    s3_key: "imports/{{ vm_name }}-aws-export-clone-{{ migration_run_id }}.ova"
+    catalog_entry_path: >-
+      /tmp/.{{ vm_name }}-aws-export-clone-{{ migration_run_id }}.catalog-entry.json
+
+- name: Create the AWS migration artifact directory
+  ansible.builtin.file:
+    path: "{{ aws_migration_run_dir }}"
+    state: directory
+    mode: "0700"
+

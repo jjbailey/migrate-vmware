@@ -1,0 +1,17 @@
+#cloud-config
+# examples/openstack-dhcp-user-data.yaml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+#
+# DEPRECATED historical sample, retained for compatibility with the
+# `openstack_dhcp_user_data` option. Cloud-init ignores network: configuration
+# in ordinary user-data, so this file cannot configure DHCP. Do not attach it
+# for guest networking; configure DHCP through Neutron and network metadata.
+# Use custom user-data files only for non-network initialization tasks.
+network:
+  version: 2
+  ethernets:
+    all-interfaces:
+      match:
+        name: "e*"
+      dhcp4: true
+      optional: true

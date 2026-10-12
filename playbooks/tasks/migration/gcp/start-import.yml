@@ -1,0 +1,97 @@
+---
+# playbooks/tasks/migration/gcp/start-import.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Phase two for one disk: clear any stale import job of the same name and hand
+# the staged VMDK to Migrate to Virtual Machines. This returns as soon as the
+# job is accepted; finish-import.yml collects the result.
+#
+# The first disk receives guest OS adaptation. Remaining disks use the same
+# image-import API with OS adaptation skipped so they become usable data-disk
+# images.
+
+- name: Check for a stale M2VM import job
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - migration
+      - image-imports
+      - describe
+      - "{{ gcp_disk.image }}"
+      - "--location={{ gcp_import_location }}"
+      - "--project={{ gcp_project }}"
+      - "--format=value(name)"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_stale_import_check
+  changed_when: false
+  failed_when: >-
+    gcp_stale_import_check.rc != 0 and
+    (gcp_stale_import_check.stderr | lower) is not search(gcp_absent_resource_pattern)
+
+- name: Delete the stale M2VM import job if present
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - migration
+      - image-imports
+      - delete
+      - "{{ gcp_disk.image }}"
+      - "--location={{ gcp_import_location }}"
+      - "--project={{ gcp_project }}"
+      - --quiet
+  environment: "{{ gcp_gcloud_env }}"
+  when: gcp_stale_import_check.rc == 0
+  changed_when: gcp_stale_import_check.rc == 0
+
+- name: Wait for the stale M2VM import job deletion to complete
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - migration
+      - image-imports
+      - describe
+      - "{{ gcp_disk.image }}"
+      - "--location={{ gcp_import_location }}"
+      - "--project={{ gcp_project }}"
+      - "--format=value(name)"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_deleted_import_check
+  until: >-
+    gcp_deleted_import_check.rc != 0 and
+    (gcp_deleted_import_check.stderr | lower) is search(gcp_absent_resource_pattern)
+  retries: "{{ gcp_delete_poll_retries | int }}"
+  delay: "{{ gcp_delete_poll_delay | int }}"
+  changed_when: false
+  failed_when: >-
+    gcp_deleted_import_check.rc != 0 and
+    (gcp_deleted_import_check.stderr | lower) is not search(gcp_absent_resource_pattern)
+  when: gcp_stale_import_check.rc == 0
+
+- name: Track the image this import will create
+  # Recorded before the job starts, not after it finishes: a failed or
+  # interrupted import can still leave an image behind, and cleanup.yml can
+  # only remove what it knows the name of.
+  ansible.builtin.set_fact:
+    gcp_created_image_names: "{{ gcp_created_image_names + [gcp_disk.image] }}"
+
+- name: Start the M2VM image import
+  ansible.builtin.command:
+    argv: >-
+      {{ ['gcloud', 'compute', 'migration', 'image-imports', 'create', gcp_disk.image,
+          '--location', gcp_import_location,
+          '--source-file', 'gs://' ~ gcs_bucket ~ '/' ~ gcp_disk.object,
+          '--project', gcp_project, '--quiet']
+         + (['--skip-os-adaptation'] if not gcp_disk.is_boot else []) }}
+  environment: "{{ gcp_gcloud_env }}"
+  changed_when: true
+
+- name: Display the M2VM import status
+  ansible.builtin.debug:
+    msg: >-
+      M2VM image import started for {{ gcp_disk.image }} in
+      {{ gcp_import_location }} from
+      gs://{{ gcs_bucket }}/{{ gcp_disk.object }}
+

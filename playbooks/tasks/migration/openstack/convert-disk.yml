@@ -1,0 +1,49 @@
+---
+# playbooks/tasks/migration/openstack/convert-disk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Start one disk's VMDK-to-QCOW2 conversion in the background and remember its
+# job ID. The caller decides when to collect it, which is what lets a
+# conversion overlap the previous disk's upload.
+#
+# Expects: openstack_convert_disk (a manifest disk entry)
+
+- name: Verify the exported OVF VMDK
+  ansible.builtin.stat:
+    path: "{{ migration_run_dir }}/{{ openstack_convert_disk.path }}"
+  register: openstack_source_disk_stat
+
+- name: Reject a missing or incomplete OVF VMDK
+  ansible.builtin.assert:
+    that:
+      - openstack_source_disk_stat.stat.exists
+      - openstack_convert_disk.file_size_bytes is none or
+        openstack_source_disk_stat.stat.size == (openstack_convert_disk.file_size_bytes | int)
+    fail_msg: >-
+      OVF disk {{ openstack_convert_disk.index }} is missing or incomplete; the
+      OVF package or its manifest may be damaged.
+
+- name: Start this VMDK's conversion to QCOW2 atomically
+  # -m/-W let qemu-img keep several coroutines in flight and write them out of
+  # order, which a single-threaded default conversion cannot do. The temporary
+  # name plus the final mv means an interrupted run never leaves a short qcow2
+  # that looks complete.
+  ansible.builtin.shell: |
+    set -eu
+    temporary="{{ openstack_staging_dir }}/disk-{{ openstack_convert_disk.index }}.qcow2.tmp"
+    rm -f "$temporary"
+    "{{ qemu_img_bin }}" convert {{ openstack_convert_args | join(' ') }} \
+      -f vmdk -O qcow2 \
+      "{{ migration_run_dir }}/{{ openstack_convert_disk.path }}" "$temporary"
+    mv -f "$temporary" "{{ openstack_staging_dir }}/disk-{{ openstack_convert_disk.index }}.qcow2"
+  async: "{{ openstack_convert_async_timeout | int }}"
+  poll: 0
+  register: openstack_convert_started
+  changed_when: true
+
+- name: Remember this disk's conversion job
+  ansible.builtin.set_fact:
+    openstack_convert_jobs: >-
+      {{ openstack_convert_jobs
+         | combine({openstack_convert_disk.index | string: openstack_convert_started.ansible_job_id}) }}
+

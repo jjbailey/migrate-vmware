@@ -1,0 +1,18 @@
+---
+# requirements.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+#
+# Installed via: ansible-galaxy collection install -r requirements.yml
+# Pinned because module parameter names and return value shapes can change
+# across collection releases; the workflows are verified against these versions.
+# community.vmware 5.10.0 is intentionally retained with ansible-core 2.18.
+# The current 6.3.0 release requires ansible-core 2.19+ and its snapshot module
+# is deprecated, so upgrade that pair together after migrating to vmware.vmware.
+
+collections:
+  - name: amazon.aws
+    version: "11.4.0"
+  - name: community.vmware
+    version: "5.10.0"
+  - name: openstack.cloud
+    version: "2.6.0"

@@ -1,0 +1,74 @@
+---
+# playbooks/tasks/migration/gcp/cleanup.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Best-effort cleanup for GCP-owned artifacts.
+
+- name: Remove staging objects from GCS
+  # One gcloud invocation for every object, rather than one API round trip per
+  # object through the storage module.
+  ansible.builtin.command:
+    argv: >-
+      {{ ['gcloud', 'storage', 'rm', '--project=' ~ gcp_project]
+         + (gcp_gcs_object_names | map('regex_replace', '^', 'gs://' ~ gcs_bucket ~ '/') | list) }}
+  environment: "{{ gcp_gcloud_env | default({}) }}"
+  when:
+    - gcp_gcs_object_names is defined and gcp_gcs_object_names | length > 0
+    - (migration_succeeded | default(false) | bool) or (discard_failed_artifacts | bool)
+  register: gcp_gcs_remove
+  changed_when: true
+  failed_when: false
+
+# gcloud storage rm deletes in parallel and attempts every URL, so one object
+# that is already gone does not leave the others staged -- it only makes the
+# command exit non-zero. Report that instead of discarding it, so an unexpected
+# failure is not invisible.
+- name: Report GCS staging objects that could not be removed
+  ansible.builtin.debug:
+    msg: >-
+      gcloud storage rm exited {{ gcp_gcs_remove.rc }}. Objects that existed were
+      still removed; a already-absent object is expected on a re-run.
+      Detail: {{ gcp_gcs_remove.stderr | default('(none)') }}
+  when:
+    - gcp_gcs_remove is defined
+    - (gcp_gcs_remove.rc | default(0)) != 0
+
+- name: Report retained GCS staging objects for a failed run
+  ansible.builtin.debug:
+    msg: >-
+      Migration did not complete. Staging objects were retained under
+      gs://{{ gcs_bucket }}/{{ gcs_prefix | default('') }} for debugging;
+      re-running the playbook re-uploads them.
+  when:
+    - gcp_gcs_object_names is defined and gcp_gcs_object_names | length > 0
+    - not (migration_succeeded | default(false) | bool)
+    - not (discard_failed_artifacts | bool)
+
+- name: Remove Compute images created by this failed run
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - images
+      - delete
+      - "{{ item }}"
+      - "--project={{ gcp_project }}"
+      - --quiet
+  environment: "{{ gcp_gcloud_env | default({}) }}"
+  loop: "{{ gcp_created_image_names | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - gcp_created_image_names is defined and gcp_created_image_names | length > 0
+    - not (migration_succeeded | default(false) | bool)
+    - discard_failed_artifacts | bool
+  changed_when: true
+  failed_when: false
+
+- name: Remove the temporary service account key file
+  ansible.builtin.file:
+    path: "{{ gcp_sa_key_file.path }}"
+    state: absent
+  when: gcp_sa_key_file is defined and gcp_sa_key_file.path is defined
+  failed_when: false
+

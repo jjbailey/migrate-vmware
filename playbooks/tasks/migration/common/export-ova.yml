@@ -1,0 +1,158 @@
+---
+# playbooks/tasks/migration/common/export-ova.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Resolve, snapshot, clone, export, and inspect one vSphere VM.
+#
+# Required inputs:
+#   datacenter, vm_name, validate_certs, quiesce_snapshot
+#   snapshot_name, clone_name, ova_local_path or ovf_local_path, migration_target
+# Outputs:
+#   source_vm_path, source_vm_folder, artifact_manifest
+
+- name: Resolve the source VM inventory path
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command: >-
+    {{ govc_bin }} find /{{ datacenter }}/vm -type m -name "{{ vm_name }}"
+  register: source_vm_find
+  changed_when: false
+  failed_when: source_vm_find.rc != 0 or (source_vm_find.stdout_lines | length != 1)
+
+- name: Record the source and clone inventory paths
+  ansible.builtin.set_fact:
+    source_vm_path: "{{ source_vm_find.stdout | trim }}"
+    source_vm_folder: "{{ source_vm_find.stdout | trim | regex_replace('/[^/]+$', '') }}"
+    # The password belongs in the URL, not on stdin: ovftool only reads a
+    # password interactively, and with a pipe on fd 0 it spins forever
+    # retrying the "turn echo off" ioctl instead of ever calling read().
+    vcenter_export_url: >-
+      vi://{{ vcenter_username | urlencode | replace('/', '%2F') }}:{{
+      vcenter_password | urlencode | replace('/', '%2F') }}@{{ vcenter_hostname
+      }}{{ source_vm_find.stdout | trim | regex_replace('/[^/]+$', '') }}/{{ clone_name | urlencode }}
+  no_log: true
+
+- name: Read the source VM datastore placement
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command: >-
+    {{ govc_bin }} vm.info -json "{{ source_vm_path }}"
+  register: source_vm_info
+  changed_when: false
+  failed_when: source_vm_info.rc != 0
+  no_log: true
+
+- name: Record the source datastore name
+  ansible.builtin.set_fact:
+    source_vm_datastore: >-
+      {{ (source_vm_info.stdout | from_json).virtualMachines[0].config.datastoreUrl[0].name }}
+  no_log: true
+
+- name: Record source virtual NIC MAC addresses in device order
+  ansible.builtin.set_fact:
+    source_mac_addresses: >-
+      {{ (source_vm_info.stdout | from_json).virtualMachines[0].config.hardware.device
+         | selectattr('macAddress', 'defined')
+         | sort(attribute='key')
+         | map(attribute='macAddress')
+         | list }}
+  no_log: true
+
+- name: Mark the snapshot for best-effort cleanup
+  ansible.builtin.set_fact:
+    snapshot_cleanup_required: true
+
+- name: Create a snapshot of the source VM
+  community.vmware.vmware_guest_snapshot:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs | bool }}"
+    datacenter: "{{ datacenter }}"
+    folder: "{{ source_vm_folder }}"
+    name: "{{ vm_name }}"
+    snapshot_name: "{{ snapshot_name }}"
+    state: present
+    description: "Snapshot created for {{ migration_target }} artifact export"
+    quiesce: "{{ quiesce_snapshot }}"
+  no_log: true
+
+- name: Mark the clone for best-effort cleanup
+  ansible.builtin.set_fact:
+    clone_cleanup_required: true
+
+- name: Clone a full copy of the VM from the snapshot
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command: >-
+    {{ govc_bin }} vm.clone -vm="{{ source_vm_path }}"
+    -folder="{{ source_vm_folder }}" -ds="{{ source_vm_datastore }}"
+    -snapshot="{{ snapshot_name }}" -on=false "{{ clone_name }}"
+  register: govc_clone
+  changed_when: govc_clone.rc == 0
+  failed_when: govc_clone.rc != 0
+
+- name: Find stale OVF package files before a fresh export
+  ansible.builtin.find:
+    paths:
+      - "{{ migration_run_dir }}"
+    patterns:
+      # Every member ovftool writes beside the descriptor: the descriptor and
+      # manifest, the disks, and the non-disk files it references (NVRAM for
+      # EFI guests, ISOs for attached media). Leaving one behind makes the
+      # next export abort with "target already exists".
+      - export.ovf
+      - export.mf
+      - export-disk*.vmdk
+      - export-disk*.vmdk.gz
+      - export-file*
+    file_type: file
+  register: stale_ovf_files
+  when:
+    - (export_format | default('ova')) == 'ovf'
+    - migration_run_dir is defined
+
+- name: Remove stale OVF package files before a fresh export
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ stale_ovf_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  when:
+    - (export_format | default('ova')) == 'ovf'
+    - migration_run_dir is defined
+    - not (migration_resume_mode | default(false) | bool)
+
+- name: Export the clone to the target artifact format
+  ansible.builtin.command: >-
+    ovftool --acceptAllEulas {{ '--noSSLVerify' if not (validate_certs | bool) else '' }}
+    "{{ vcenter_export_url }}"
+    "{{ ovf_local_path if (export_format | default('ova')) == 'ovf' else ova_local_path }}"
+  no_log: true
+
+- name: Inspect the exported artifact
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ playbook_dir }}/../bin/inspect-ova.py"
+      - "{{ '--ovf' if (export_format | default('ova')) == 'ovf' else '--ova' }}"
+      - "{{ ovf_local_path if (export_format | default('ova')) == 'ovf' else ova_local_path }}"
+  register: ova_manifest_result
+  changed_when: false
+
+- name: Record the target-neutral artifact manifest
+  ansible.builtin.set_fact:
+    artifact_manifest: >-
+      {{ (ova_manifest_result.stdout | from_json)
+         | combine({'source_mac_addresses': source_mac_addresses | default([])}) }}
+

@@ -1,0 +1,45 @@
+---
+# playbooks/tasks/migration/openstack/build-catalog-entry.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Build the target-specific portion of the shared migration catalog record.
+# The source provenance and migrated_at are added by
+# common/build-migration-entry.yml; only the OpenStack fields are listed here.
+
+- name: Verify the Glance images are in manifest disk order
+  # openstack_image_ids[0] boots the instance and the rest become data volumes
+  # in order, so the lists must line up one-to-one with the manifest's disks.
+  ansible.builtin.assert:
+    that:
+      - openstack_image_names == openstack_expected_image_names
+      - openstack_image_ids == openstack_expected_image_ids
+    fail_msg: >-
+      Glance images {{ openstack_image_names }} / {{ openstack_image_ids }} do
+      not match the manifest disk order {{ openstack_expected_image_names }} /
+      {{ openstack_expected_image_ids }}; not recording a catalog entry.
+  vars:
+    openstack_expected_image_names: >-
+      {{ artifact_manifest.disks | map(attribute='index') | map('string')
+         | map('regex_replace', '^', openstack_image_prefix ~ '-disk-') | list }}
+    openstack_expected_image_ids: >-
+      {{ artifact_manifest.disks | map(attribute='index') | map('string')
+         | map('extract', openstack_disk_image_ids) | list }}
+
+- name: Build the OpenStack migration catalog entry
+  ansible.builtin.import_tasks: ../common/build-migration-entry.yml
+  vars:
+    migration_entry_fields:
+      target_platform: openstack
+      artifact_type: qcow2-disk-set
+      artifact_manifest: "{{ artifact_manifest }}"
+      openstack_image_ids: "{{ openstack_image_ids }}"
+      openstack_image_names: "{{ openstack_image_names }}"
+      openstack_project: "{{ openstack_target_project_name }}"
+      openstack_project_id: "{{ openstack_auth_project_id }}"
+      status: completed
+
+- name: Add the OpenStack migration region when configured
+  ansible.builtin.set_fact:
+    migration_entry: "{{ migration_entry | combine({'openstack_region': openstack_region_name}) }}"
+  when: openstack_region_name | length > 0
+

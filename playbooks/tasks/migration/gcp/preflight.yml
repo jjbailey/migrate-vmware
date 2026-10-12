@@ -1,0 +1,27 @@
+---
+# playbooks/tasks/migration/gcp/preflight.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# GCP credentials and prerequisites.
+
+- name: Select the GCP project for this run
+  ansible.builtin.import_tasks: select-project.yml
+
+- name: Check gcloud
+  ansible.builtin.command: gcloud --version
+  register: gcloud_check
+  failed_when: gcloud_check.rc != 0
+  changed_when: false
+
+- name: Check the Migrate to Virtual Machines image-import command
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - migration
+      - vms
+      - image-imports
+      - --help
+  register: gcp_image_import_command_check
+  failed_when: gcp_image_import_command_check.rc != 0
+  changed_when: false
+

@@ -1,0 +1,90 @@
+---
+# playbooks/bootstrap-aws-import.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Run this once per AWS account/region (or whenever s3_bucket/vmimport_role_name
+# change), before migrate-aws-vm.yml. It creates the vmimport role AWS's VM
+# Import/Export service assumes, and the S3 bucket OVAs get staged through.
+# migrate-aws-vm.yml assumes both already exist and does not attempt to (re)create
+# them, so a fresh account needs this run first.
+#
+# The AWS region/bucket/role and credentials come from vaults/aws.yml (see
+# README.md "Secrets"); -e/--extra-vars still override any of them.
+
+- name: Bootstrap AWS VM Import/Export prerequisites
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment: "{{ aws_task_env }}"
+
+  vars_files:
+    - vars/aws-common.yml
+
+  tasks:
+    - name: Select the AWS project for this run
+      ansible.builtin.include_tasks: tasks/migration/aws/select-project.yml
+
+    - name: Check for a local AWS credentials file fallback
+      ansible.builtin.stat:
+        path: "{{ '~/.aws/credentials' | expanduser }}"
+      register: aws_cred_file
+
+    - name: Warn if AWS credentials are neither in the vault nor in ~/.aws
+      ansible.builtin.debug:
+        msg: >-
+          No AWS credentials resolved: vaults/aws.yml has an empty
+          aws_secret_access_key and ~/.aws/credentials is absent. AWS tasks
+          will fail unless an instance profile provides credentials - run
+          ansible-vault edit vaults/aws.yml to add the secret key.
+      when:
+        - aws_task_env | length == 0
+        - not aws_cred_file.stat.exists
+
+    - name: Ensure the OVA staging bucket exists
+      amazon.aws.s3_bucket:
+        name: "{{ s3_bucket }}"
+        region: "{{ aws_region }}"
+        state: present
+
+    - name: Ensure the vmimport role exists (trust policy for vmie.amazonaws.com)
+      amazon.aws.iam_role:
+        name: "{{ vmimport_role_name }}"
+        description: "Assumed by AWS VM Import/Export to write imported AMIs/snapshots"
+        assume_role_policy_document:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: vmie.amazonaws.com
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  sts:ExternalId: vmimport
+        create_instance_profile: false
+        state: present
+
+    - name: Ensure the vmimport role can read the staging bucket and import images
+      amazon.aws.iam_policy:
+        iam_type: role
+        iam_name: "{{ vmimport_role_name }}"
+        policy_name: vmimport
+        state: present
+        policy_json:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetBucketLocation
+                - s3:GetObject
+                - s3:ListBucket
+              Resource:
+                - "arn:aws:s3:::{{ s3_bucket }}"
+                - "arn:aws:s3:::{{ s3_bucket }}/*"
+            - Effect: Allow
+              Action:
+                - ec2:ModifySnapshotAttribute
+                - ec2:CopySnapshot
+                - ec2:RegisterImage
+                - ec2:Describe*
+              Resource: "*"
+

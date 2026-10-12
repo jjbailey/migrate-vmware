@@ -1,0 +1,72 @@
+---
+# playbooks/tasks/migration/gcp/initialize.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Stable GCP names, persistent paths, and lifecycle state.
+
+- name: Generate or reuse the GCP migration run ID
+  ansible.builtin.set_fact:
+    migration_run_id: >-
+      {{ resume_run_id if (resume_run_id | length > 0) else lookup('pipe', 'python3 -c "import time; print(time.time_ns())"') }}
+    migration_resume_mode: "{{ resume_run_id | length > 0 }}"
+    migration_succeeded: false
+    snapshot_cleanup_required: false
+    clone_cleanup_required: false
+    gcp_created_image_names: []
+    gcp_gcs_object_names: []
+    gcp_image_names: []
+    gcp_image_selflinks: []
+    gcp_reused_image_names: []
+
+- name: Record how gcloud reports a missing resource
+  # Every existence probe below reads these instead of repeating the same
+  # list of gcloud phrasings in its own failed_when.
+  ansible.builtin.set_fact:
+    gcp_absent_object_pattern: 'not found|does not exist|matched no objects|(^|[^0-9a-z_-])404($|[^0-9a-z_-])'
+    gcp_absent_resource_pattern: 'not found|does not exist'
+
+- name: Sanitize the VM name for GCP resource naming
+  ansible.builtin.set_fact:
+    # Compute Engine image names may only contain lowercase letters, digits,
+    # and hyphens.
+    gcp_vm_slug: "{{ vm_name | lower | regex_replace('[^a-z0-9]+', '-') | regex_replace('^-+|-+$', '') }}"
+
+- name: Give the slug a letter prefix when GCP would reject it
+  ansible.builtin.set_fact:
+    # Image names must start with a letter, so a leading digit (or an empty
+    # slug from an all-symbolic VM name) gets a fixed valid prefix.
+    gcp_vm_slug: "{{ 'vm-' ~ gcp_vm_slug if (gcp_vm_slug | length == 0 or gcp_vm_slug is match('^[0-9]')) else gcp_vm_slug }}"
+
+- name: Compute the VM-slug budget for GCP image names
+  ansible.builtin.set_fact:
+    # Image names are at most 63 characters. Every image name is
+    # "<prefix>-disk-<index>", so reserve room for the "-migration-<run id>"
+    # infix and a three-digit "-disk-NNN" suffix.
+    gcp_vm_slug_budget: "{{ 63 - ('-migration-' ~ migration_run_id ~ '-disk-000') | length }}"
+
+- name: Trim the VM slug to fit the GCP image-name budget
+  ansible.builtin.set_fact:
+    gcp_vm_slug_trimmed: "{{ gcp_vm_slug[:gcp_vm_slug_budget | int] | regex_replace('-+$', '') }}"
+
+- name: Derive the persistent GCP run directory
+  ansible.builtin.set_fact:
+    migration_run_dir: >-
+      {{ artifact_root }}/gcp/{{ vm_name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/{{ migration_run_id }}
+
+- name: Derive GCP migration names and paths
+  ansible.builtin.set_fact:
+    snapshot_name: "ansible-gcp-export-snap-{{ migration_run_id }}"
+    clone_name: "{{ vm_name }}-gcp-export-clone-{{ migration_run_id }}"
+    ovf_local_path: "{{ migration_run_dir }}/export.ovf"
+    artifact_manifest_path: "{{ migration_run_dir }}/artifact-manifest.json"
+    gcs_prefix: "migrate-vmware/{{ migration_run_id }}"
+    gcp_image_prefix: "{{ gcp_vm_slug_trimmed ~ '-migration-' ~ migration_run_id }}"
+    catalog_entry_path: >-
+      /tmp/.{{ vm_name }}-gcp-export-clone-{{ migration_run_id }}.catalog-entry.json
+
+- name: Create the persistent GCP run directory
+  ansible.builtin.file:
+    path: "{{ migration_run_dir }}"
+    state: directory
+    mode: "0700"
+

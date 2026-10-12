@@ -1,0 +1,20 @@
+---
+# playbooks/vars/migration-common.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Defaults shared by every vSphere-to-cloud migration entry playbook.
+
+validate_certs: true
+datacenter: "Datacenter"
+vm_name: "my-vm"
+quiesce_snapshot: true
+
+govc_url: "{{ GOVC_URL }}"
+govc_username: "{{ GOVC_USERNAME }}"
+govc_password: "{{ GOVC_PASSWORD }}"
+govc_bin: govc
+govc_insecure: "{{ '1' if not (validate_certs | bool) else GOVC_INSECURE | string }}"
+
+discard_failed_artifacts: false
+migration_catalog_path: "{{ playbook_dir }}/../catalogs/migration-catalog.json"
+

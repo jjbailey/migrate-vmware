@@ -1,0 +1,27 @@
+---
+# playbooks/tasks/migration/common/append-catalog.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Append the target-built migration_entry to the shared catalog.
+
+- name: Prepare the migration catalog entry
+  ansible.builtin.copy:
+    content: "{{ migration_entry | to_json }}"
+    dest: "{{ catalog_entry_path }}"
+    mode: "0600"
+
+- name: Record the migration in the catalog
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ playbook_dir }}/../bin/append-migration-catalog.py"
+      - --catalog
+      - "{{ migration_catalog_path }}"
+      - --entry
+      - "{{ catalog_entry_path }}"
+  changed_when: true
+
+- name: Mark the migration successful
+  ansible.builtin.set_fact:
+    migration_succeeded: true
+

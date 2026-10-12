@@ -1,0 +1,28 @@
+---
+# playbooks/tasks/migration/aws/build-catalog-entry.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Build the target-specific portion of the shared migration catalog record.
+# The source provenance and migrated_at are added by
+# common/build-migration-entry.yml; only the AWS fields are listed here.
+
+- name: Build the AWS migration catalog entry
+  ansible.builtin.import_tasks: ../common/build-migration-entry.yml
+  vars:
+    migration_entry_fields:
+      s3_bucket: "{{ s3_bucket }}"
+      s3_key: "{{ s3_key }}"
+      target_platform: aws
+      artifact_type: ova
+      artifact_manifest: "{{ artifact_manifest }}"
+      aws_region: "{{ aws_region }}"
+      ami_id: "{{ import_status.import_image[0].image_id }}"
+      ami_name: "{{ vm_name }}"
+      import_task_id: "{{ import_start.import_image.import_task_id }}"
+      status: "{{ import_status.import_image[0].status }}"
+
+- name: Add AWS account scope to the migration catalog entry
+  ansible.builtin.set_fact:
+    migration_entry: "{{ migration_entry | combine({'aws_account_id': aws_account_id}) }}"
+  when: aws_account_id | default('') | length > 0
+

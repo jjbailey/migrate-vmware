@@ -1,0 +1,84 @@
+---
+# playbooks/tasks/launch-gcp-data-disk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Create and attach one GCP data disk from a migrated Compute image.
+
+- name: Derive the GCP data disk name
+  ansible.builtin.set_fact:
+    gcp_data_disk_name: "{{ ((gcp_instance_name ~ '-data-' ~ (gcp_data_disk_index | int + 1))[:63]) | regex_replace('-+$', '') }}"
+    gcp_data_device_name: "data-disk-{{ gcp_data_disk_index | int + 1 }}"
+
+- name: Check whether the GCP data disk already exists
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - disks
+      - describe
+      - "{{ gcp_data_disk_name }}"
+      - "--zone={{ gcp_zone }}"
+      - "--project={{ gcp_project }}"
+      - "--format=value(name)"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_data_disk_check
+  changed_when: false
+  failed_when: >-
+    gcp_data_disk_check.rc != 0 and
+    ('not found' not in (gcp_data_disk_check.stderr | lower)) and
+    ('does not exist' not in (gcp_data_disk_check.stderr | lower))
+
+- name: Create the GCP data disk from its migrated image
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - disks
+      - create
+      - "{{ gcp_data_disk_name }}"
+      - "--image={{ gcp_data_image }}"
+      - "--image-project={{ gcp_project }}"
+      - "--type={{ gcp_disk_type }}"
+      - "--zone={{ gcp_zone }}"
+      - "--project={{ gcp_project }}"
+      - --quiet
+  environment: "{{ gcp_gcloud_env }}"
+  when: gcp_data_disk_check.rc != 0
+  changed_when: true
+
+- name: Check whether the GCP data disk is already attached
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - instances
+      - describe
+      - "{{ gcp_instance_name }}"
+      - "--zone={{ gcp_zone }}"
+      - "--project={{ gcp_project }}"
+      - "--format=value(disks[].deviceName)"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_attached_device_names
+  changed_when: false
+
+- name: Attach the GCP data disk
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - instances
+      - attach-disk
+      - "{{ gcp_instance_name }}"
+      - "--disk={{ gcp_data_disk_name }}"
+      - "--device-name={{ gcp_data_device_name }}"
+      - "--zone={{ gcp_zone }}"
+      - "--project={{ gcp_project }}"
+      - --quiet
+  environment: "{{ gcp_gcloud_env }}"
+  when: gcp_data_device_name not in (gcp_attached_device_names.stdout_lines | default([]))
+  changed_when: true
+
+- name: Record the GCP data disk
+  ansible.builtin.set_fact:
+    gcp_data_disk_names: "{{ gcp_data_disk_names + [gcp_data_disk_name] }}"
+

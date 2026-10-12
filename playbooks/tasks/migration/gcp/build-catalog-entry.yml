@@ -1,0 +1,42 @@
+---
+# playbooks/tasks/migration/gcp/build-catalog-entry.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Build the target-specific portion of the shared migration catalog record.
+# The source provenance and migrated_at are added by
+# common/build-migration-entry.yml; only the GCP fields are listed here.
+
+- name: Verify the imported images are in manifest disk order
+  # The catalog's boot image is entry 0 and its data images are the rest, in
+  # order, and launch attaches them in that order. Refuse to record a row whose
+  # images do not line up one-to-one with the manifest's disks.
+  ansible.builtin.assert:
+    that:
+      - gcp_image_names == gcp_expected_image_names
+      - gcp_image_selflinks | map('regex_replace', '^.*/', '') | list == gcp_expected_image_names
+    fail_msg: >-
+      Imported GCP images {{ gcp_image_names }} (selfLinks
+      {{ gcp_image_selflinks }}) do not match the manifest disk order
+      {{ gcp_expected_image_names }}; not recording a catalog entry.
+  vars:
+    gcp_expected_image_names: >-
+      {{ artifact_manifest.disks | map(attribute='index') | map('string')
+         | map('regex_replace', '^', gcp_image_prefix ~ '-disk-') | list }}
+
+- name: Build the GCP migration catalog entry
+  ansible.builtin.import_tasks: ../common/build-migration-entry.yml
+  vars:
+    migration_entry_fields:
+      target_platform: gcp
+      artifact_type: vmdk-disk-set
+      artifact_manifest: "{{ artifact_manifest }}"
+      gcp_project: "{{ gcp_project }}"
+      gcp_import_location: "{{ gcp_import_location }}"
+      gcs_bucket: "{{ gcs_bucket }}"
+      gcs_prefix: "{{ gcs_prefix }}"
+      gcp_boot_image_name: "{{ gcp_image_names[0] }}"
+      gcp_boot_image_selflink: "{{ gcp_image_selflinks[0] }}"
+      gcp_data_image_names: "{{ gcp_image_names[1:] }}"
+      gcp_data_image_selflinks: "{{ gcp_image_selflinks[1:] }}"
+      status: completed
+
