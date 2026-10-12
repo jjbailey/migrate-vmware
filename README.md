@@ -27,7 +27,9 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   ovftool --version
   ```
 
-- Access to vCenter and to each destination cloud you use. AWS migrations
+- Access to vCenter and to each destination cloud you use, with accounts
+  that already hold the privileges listed under
+  [Required Privileges](#required-privileges). AWS migrations
   require permission to create the VM import IAM role and policy, use the
   staging S3 bucket, and run `ec2:ImportImage`. OpenStack migrations require
   image, volume, network, and server permissions. Before the first GCP image
@@ -64,6 +66,48 @@ The playbooks run directly on the control host using Ansible, `govc`, and
 - `dialog` or `whiptail` is required only for the interactive dialogs
   (`bin/*-dialog.sh`; see [Interactive Dialogs](#interactive-dialogs)) and
   should be available on `PATH`.
+
+## Required Privileges
+
+These playbooks do not create accounts or grant access. Each credential in
+`vaults/` must already be allowed to do what that stage needs. The lists below
+describe the operations the playbooks perform, as a starting point for your
+administrator; they are not a tested minimal policy, so tighten or adjust them
+for your environment. Migration and launch can use different credentials, and
+the AWS bootstrap is a one-time administrative step.
+
+- **vCenter** (`vcenter_username`): read access to the inventory and the
+  source VM's datastore; permission to create and remove a snapshot on the VM
+  (`VirtualMachine.State.CreateSnapshot` and `RemoveSnapshot`); and permission
+  to export it as an OVA (`vApp.Export`). Nothing is written to vCenter other
+  than the temporary snapshot, which the run removes.
+- **AWS**:
+  - *Bootstrap* (`bootstrap-aws-import.yml`, once): create the S3 staging
+    bucket and the `vmimport` IAM role and its inline policy
+    (`s3:CreateBucket`, `iam:CreateRole`, `iam:PutRolePolicy`, plus the
+    matching `Get`/`List` calls to check for existing resources).
+  - *Migration*: write, read, and delete objects in the staging bucket;
+    `ec2:ImportImage`, `ec2:DescribeImportImageTasks`, and tagging the
+    resulting image and snapshot.
+  - *Launch*: `ec2:RunInstances` and tagging, and read access to the images,
+    subnets, and security groups you name.
+- **GCP** (`service_account_key`): in the project selected by `gcp_project`,
+  upload, list, and delete objects in `gcs_bucket`; create, read, and delete
+  Compute images; create, read, and delete VM Migration image imports (the
+  Cloud Build service account used by the import needs its usual access to
+  the bucket and Compute); and, for launches, create instances and disks,
+  attach disks, and act as the instance's service account. Predefined roles
+  that cover this include Storage Object Admin, Compute Image User/Admin,
+  Compute Instance Admin (v1), VM Migration Admin, and Service Account User.
+- **OpenStack** (the `openstack_projects` entry): within the target project,
+  create, upload, and delete Glance images; create and delete Cinder volumes;
+  read networks and security groups; and create Neutron ports and Nova servers.
+  Creating ports with explicit MAC addresses (`openstack_preserve_mac=true`)
+  is restricted to administrators by default Neutron policy, so that option
+  needs either an admin-capable account or a relaxed policy.
+- **Control host**: write access to `artifact_root` with enough free space for
+  the exported OVA and converted disks, and network reach to vCenter and the
+  cloud APIs.
 
 ## One-time Setup
 
