@@ -1,0 +1,74 @@
+---
+# playbooks/migrate-openstack-vm.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Migrates one vSphere VM to OpenStack. The shared VMware task pipeline
+# creates a snapshot-backed clone and exports a validated OVF package; OpenStack-
+# specific tasks convert and upload each disk.
+
+- name: Migrate a vSphere VM to OpenStack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/migration-common.yml
+
+  vars:
+    migration_target: openstack
+    export_format: ovf
+    qemu_img_bin: qemu-img
+    openstack_boot_mode: uefi
+    resume_run_id: ""
+    artifact_root: "/var/tmp/migrate-vmware"
+    openstack_import_poll_retries: 240
+    openstack_import_poll_delay: 15
+    # Extra qemu-img convert arguments. -m keeps several coroutines in flight
+    # and -W lets them write out of order, which a default single-threaded
+    # conversion cannot do. Cache-mode flags such as "-T none" are deliberately
+    # absent: O_DIRECT is not available on every filesystem.
+    openstack_convert_args: ['-m', '16', '-W']
+    # Conversions run in the background so they can overlap the previous disk's
+    # upload; these bound how long one may take.
+    openstack_convert_async_timeout: 86400
+    openstack_convert_poll_retries: 2880
+    openstack_convert_poll_delay: 30
+
+  tasks:
+    - name: Run shared VMware preflight checks
+      ansible.builtin.import_tasks: tasks/migration/common/preflight.yml
+
+    - name: Run OpenStack preflight checks
+      ansible.builtin.import_tasks: tasks/migration/openstack/preflight.yml
+
+    - name: Initialize the OpenStack migration
+      ansible.builtin.import_tasks: tasks/migration/openstack/initialize.yml
+
+    - name: Execute the OpenStack migration
+      block:
+        - name: Validate requested resume artifacts
+          ansible.builtin.import_tasks: tasks/migration/common/resume.yml
+
+        - name: Export and inspect the source VM
+          ansible.builtin.import_tasks: tasks/migration/common/export-ova.yml
+          when: not (migration_resume_mode | bool)
+
+        - name: Prepare OpenStack disk artifacts
+          ansible.builtin.import_tasks: tasks/migration/openstack/prepare-disks.yml
+
+        - name: Import disks into OpenStack
+          ansible.builtin.import_tasks: tasks/migration/openstack/import.yml
+
+        - name: Build the OpenStack catalog entry
+          ansible.builtin.import_tasks: tasks/migration/openstack/build-catalog-entry.yml
+
+        - name: Append the migration catalog entry
+          ansible.builtin.import_tasks: tasks/migration/common/append-catalog.yml
+
+      always:
+        - name: Clean up OpenStack resources
+          ansible.builtin.import_tasks: tasks/migration/openstack/cleanup.yml
+
+        - name: Clean up shared migration resources
+          ansible.builtin.import_tasks: tasks/migration/common/cleanup.yml
+

@@ -1,0 +1,71 @@
+---
+# playbooks/migrate-gcp-vm.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Migrates one vSphere VM to GCP. The shared VMware task pipeline creates a
+# snapshot-backed clone and exports a validated OVF package; GCP-specific tasks then
+# preserve each VMDK and import it - the first disk as a bootable Compute image
+# through Migrate to Virtual Machines (M2VM), the rest as plain Compute images
+# for data disks.
+
+- name: Migrate a vSphere VM to GCP
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/migration-common.yml
+
+  vars:
+    migration_target: gcp
+    export_format: ovf
+    resume_run_id: ""
+    artifact_root: "/var/tmp/migrate-vmware"
+    # Imports now run concurrently, so the poll delay is the tail latency on
+    # every disk rather than on the run as a whole; keep it short.
+    gcp_import_poll_retries: 240
+    gcp_import_poll_delay: 15
+    gcp_delete_poll_retries: 40
+    gcp_delete_poll_delay: 3
+    gcp_image_lookup_retries: 20
+    gcp_image_lookup_delay: 3
+    gcp_replace_existing_image: true
+
+  tasks:
+    - name: Run shared VMware preflight checks
+      ansible.builtin.import_tasks: tasks/migration/common/preflight.yml
+
+    - name: Run GCP preflight checks
+      ansible.builtin.import_tasks: tasks/migration/gcp/preflight.yml
+
+    - name: Initialize the GCP migration
+      ansible.builtin.import_tasks: tasks/migration/gcp/initialize.yml
+
+    - name: Execute the GCP migration
+      block:
+        - name: Validate requested resume artifacts
+          ansible.builtin.import_tasks: tasks/migration/common/resume.yml
+
+        - name: Export and inspect the source VM
+          ansible.builtin.import_tasks: tasks/migration/common/export-ova.yml
+          when: not (migration_resume_mode | bool)
+
+        - name: Prepare GCP disk artifacts
+          ansible.builtin.import_tasks: tasks/migration/gcp/prepare-disks.yml
+
+        - name: Import disks into GCP
+          ansible.builtin.import_tasks: tasks/migration/gcp/import.yml
+
+        - name: Build the GCP catalog entry
+          ansible.builtin.import_tasks: tasks/migration/gcp/build-catalog-entry.yml
+
+        - name: Append the migration catalog entry
+          ansible.builtin.import_tasks: tasks/migration/common/append-catalog.yml
+
+      always:
+        - name: Clean up GCP resources
+          ansible.builtin.import_tasks: tasks/migration/gcp/cleanup.yml
+
+        - name: Clean up shared migration resources
+          ansible.builtin.import_tasks: tasks/migration/common/cleanup.yml
+

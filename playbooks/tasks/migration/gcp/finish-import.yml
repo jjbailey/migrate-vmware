@@ -1,0 +1,111 @@
+---
+# playbooks/tasks/migration/gcp/finish-import.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Phase three for one disk: wait for the import started in phase two, then
+# record the resulting image. Every job is already running by the time this
+# runs, so the waits overlap and the play only spends the slowest disk's time.
+
+- name: Collect the outcome of this disk's import
+  block:
+    - name: Wait for the M2VM import to complete
+      ansible.builtin.command:
+        argv:
+          - gcloud
+          - compute
+          - migration
+          - image-imports
+          - describe
+          - "{{ gcp_disk.image }}"
+          - "--location={{ gcp_import_location }}"
+          - "--project={{ gcp_project }}"
+          - "--format=value(recentImageImportJobs[0].state)"
+      environment: "{{ gcp_gcloud_env }}"
+      register: gcp_import_job_state
+      until: >-
+        gcp_import_job_state.rc == 0 and
+        gcp_import_job_state.stdout.strip() in ['SUCCEEDED', 'FAILED', 'CANCELLED']
+      retries: "{{ gcp_import_poll_retries | int }}"
+      delay: "{{ gcp_import_poll_delay | int }}"
+      changed_when: false
+      failed_when: gcp_import_job_state.rc != 0
+
+    - name: Collect M2VM import job diagnostics on a non-successful state
+      ansible.builtin.command:
+        argv:
+          - gcloud
+          - compute
+          - migration
+          - image-imports
+          - describe
+          - "{{ gcp_disk.image }}"
+          - "--location={{ gcp_import_location }}"
+          - "--project={{ gcp_project }}"
+          - --format=json(recentImageImportJobs[0].errors,recentImageImportJobs[0].steps)
+      environment: "{{ gcp_gcloud_env }}"
+      register: gcp_import_job_diagnostics
+      changed_when: false
+      failed_when: false
+      when: gcp_import_job_state.stdout.strip() != 'SUCCEEDED'
+
+    - name: Display M2VM import job diagnostics
+      ansible.builtin.debug:
+        msg: "{{ gcp_import_job_diagnostics.stdout | default('(no diagnostics retrieved)') }}"
+      when: gcp_import_job_state.stdout.strip() != 'SUCCEEDED'
+
+    - name: Fail if the M2VM import did not succeed
+      ansible.builtin.fail:
+        msg: >-
+          M2VM image import for {{ gcp_disk.image }} ended with state
+          '{{ gcp_import_job_state.stdout.strip() | default('UNKNOWN', true) }}'.
+          Service-side detail: {{ gcp_import_job_diagnostics.stdout | default('none reported') }}
+          To retry, re-run the playbook; stale jobs will be cleaned up automatically.
+      when: gcp_import_job_state.stdout.strip() != 'SUCCEEDED'
+
+    - name: Remove the completed M2VM image-import resource
+      ansible.builtin.command:
+        argv:
+          - gcloud
+          - compute
+          - migration
+          - image-imports
+          - delete
+          - "{{ gcp_disk.image }}"
+          - "--location={{ gcp_import_location }}"
+          - "--project={{ gcp_project }}"
+          - --quiet
+      environment: "{{ gcp_gcloud_env }}"
+      changed_when: true
+      failed_when: false
+  when: gcp_disk.image not in gcp_reused_image_names
+
+- name: Retrieve the image selfLink
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - images
+      - describe
+      - "{{ gcp_disk.image }}"
+      - "--project={{ gcp_project }}"
+      - "--format=value(selfLink)"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_image_selflink_raw
+  retries: "{{ gcp_image_lookup_retries | int }}"
+  delay: "{{ gcp_image_lookup_delay | int }}"
+  until: gcp_image_selflink_raw.rc == 0 and gcp_image_selflink_raw.stdout.strip() != ''
+  changed_when: false
+  failed_when: gcp_image_selflink_raw.rc != 0
+
+- name: Record the imported image
+  ansible.builtin.set_fact:
+    gcp_image_names: "{{ gcp_image_names + [gcp_disk.image] }}"
+    gcp_image_selflinks: "{{ gcp_image_selflinks + [gcp_image_selflink_raw.stdout.strip()] }}"
+
+- name: Display the imported image
+  ansible.builtin.debug:
+    msg: >-
+      Imported {{ 'boot' if gcp_disk.is_boot else 'data' }} disk
+      {{ gcp_disk.index }} as image {{ gcp_disk.image }}
+      ({{ gcp_image_selflinks[-1] }})
+

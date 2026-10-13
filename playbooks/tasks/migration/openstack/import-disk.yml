@@ -1,0 +1,81 @@
+---
+# playbooks/tasks/migration/openstack/import-disk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Collect one disk's conversion, start the next disk's conversion, then upload
+# this disk to Glance. Starting the next conversion before this upload is what
+# overlaps the two; see import.yml for why the lookahead is one disk deep.
+
+- name: Start this disk's conversion if nothing has started it yet
+  # Only the first pending disk lands here: every later disk was started by the
+  # lookahead in the previous iteration.
+  ansible.builtin.include_tasks: convert-disk.yml
+  vars:
+    openstack_convert_disk: "{{ openstack_disk }}"
+  when: (openstack_disk.index | string) not in openstack_convert_jobs
+
+- name: Wait for this disk's conversion to finish
+  ansible.builtin.async_status:
+    jid: "{{ openstack_convert_jobs[openstack_disk.index | string] }}"
+  register: openstack_convert_result
+  until: openstack_convert_result.finished | bool
+  retries: "{{ openstack_convert_poll_retries | int }}"
+  delay: "{{ openstack_convert_poll_delay | int }}"
+
+- name: Fail if this disk's conversion failed
+  ansible.builtin.fail:
+    msg: >-
+      qemu-img convert failed for disk {{ openstack_disk.index }}:
+      {{ openstack_convert_result.stderr | default('no stderr captured') }}
+  when: openstack_convert_result.rc | default(1) != 0
+
+- name: Start the next disk's conversion while this one uploads
+  ansible.builtin.include_tasks: convert-disk.yml
+  vars:
+    openstack_convert_disk: "{{ openstack_pending_disks[openstack_pending_position + 1] }}"
+  when: openstack_pending_position + 1 < (openstack_pending_disks | length)
+
+- name: Process this disk's upload
+  block:
+    - name: Upload this disk to Glance
+      openstack.cloud.image:
+        auth: "{{ openstack_auth }}"
+        region_name: "{{ openstack_region_name }}"
+        name: "{{ openstack_image_prefix }}-disk-{{ openstack_disk.index }}"
+        filename: "{{ openstack_staging_dir }}/disk-{{ openstack_disk.index }}.qcow2"
+        disk_format: qcow2
+        container_format: bare
+        state: present
+        wait: true
+        timeout: "{{ (openstack_import_poll_retries | int) * (openstack_import_poll_delay | int) }}"
+        properties: "{{ {'hw_firmware_type': openstack_boot_mode} if (openstack_disk.index | int == 0) else {} }}"
+      register: disk_image_upload
+      no_log: true
+
+    - name: Track newly uploaded image for optional failure cleanup
+      ansible.builtin.set_fact:
+        openstack_uploaded_image_ids: >-
+          {{ openstack_uploaded_image_ids + [disk_image_upload.image.id] }}
+        openstack_uploaded_image_names: >-
+          {{ openstack_uploaded_image_names + [openstack_image_prefix ~ '-disk-' ~ (openstack_disk.index | string)] }}
+      when: disk_image_upload.image.id is defined
+
+    - name: Record the uploaded image for this disk
+      ansible.builtin.set_fact:
+        openstack_disk_image_ids: >-
+          {{ openstack_disk_image_ids
+             | combine({openstack_disk.index | string: disk_image_upload.image.id}) }}
+      no_log: true
+
+  always:
+    # Only this disk's files: the disk converted by the lookahead above is still
+    # needed by the next iteration.
+    - name: Remove this disk's temporary conversion files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ openstack_staging_dir }}/disk-{{ openstack_disk.index }}.qcow2"
+        - "{{ openstack_staging_dir }}/disk-{{ openstack_disk.index }}.qcow2.tmp"
+      failed_when: false
+

@@ -1,0 +1,49 @@
+---
+# playbooks/tasks/migration/openstack/check-image.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Decide, for one disk, whether Glance already holds its image. Disks that do
+# not are queued for conversion so the convert/upload loop never has to stop
+# and ask.
+
+- name: Find an existing Glance image for this disk
+  openstack.cloud.image_info:
+    auth: "{{ openstack_auth }}"
+    region_name: "{{ openstack_region_name }}"
+    name: "{{ openstack_image_prefix }}-disk-{{ openstack_disk.index }}"
+  register: disk_image_info
+  no_log: true
+
+- name: Fail if a disk image name is ambiguous
+  ansible.builtin.fail:
+    msg: >-
+      More than one Glance image matches
+      {{ openstack_image_prefix }}-disk-{{ openstack_disk.index }}; refusing to guess.
+  when: disk_image_info.images | length > 1
+
+- name: Fail if the existing Glance image is not active
+  # An interrupted upload leaves the image queued, saving, or killed. Reusing
+  # it would catalog a broken image as completed.
+  ansible.builtin.fail:
+    msg: >-
+      Glance image {{ openstack_image_prefix }}-disk-{{ openstack_disk.index }}
+      ({{ disk_image_info.images[0].id }}) has status
+      '{{ disk_image_info.images[0].status | default('unknown') }}', not 'active',
+      so an earlier upload did not finish. Delete it and resume again.
+  when:
+    - disk_image_info.images | length == 1
+    - (disk_image_info.images[0].status | default('')) != 'active'
+
+- name: Record the existing Glance image for this disk
+  ansible.builtin.set_fact:
+    openstack_disk_image_ids: >-
+      {{ openstack_disk_image_ids
+         | combine({openstack_disk.index | string: disk_image_info.images[0].id}) }}
+  when: disk_image_info.images | length == 1
+  no_log: true
+
+- name: Queue this disk for conversion and upload
+  ansible.builtin.set_fact:
+    openstack_pending_disks: "{{ openstack_pending_disks + [openstack_disk] }}"
+  when: disk_image_info.images | length == 0
+

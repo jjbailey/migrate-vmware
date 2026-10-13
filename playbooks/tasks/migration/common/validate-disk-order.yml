@@ -1,0 +1,21 @@
+---
+# playbooks/tasks/migration/common/validate-disk-order.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Disk order is boot order for every target: the manifest's disks are numbered
+# 0..n-1, and only disk 0 is the boot disk. Every later stage (import, catalog,
+# launch) addresses disks by that index, so refuse to go on if it is not a
+# clean sequence. Expects: artifact_manifest.
+
+- name: Verify the manifest numbers its disks in order with disk 0 as the boot disk
+  ansible.builtin.assert:
+    that:
+      - artifact_manifest.disks | length > 0
+      - artifact_manifest.disks | map(attribute='index') | list == range(artifact_manifest.disks | length) | list
+      - (artifact_manifest.disks | selectattr('boot_candidate') | map(attribute='index') | list) == [0]
+    fail_msg: >-
+      The artifact manifest's disk order is not usable: indexes
+      {{ artifact_manifest.disks | map(attribute='index') | list }}, boot
+      disk(s) {{ artifact_manifest.disks | selectattr('boot_candidate') | map(attribute='index') | list }}.
+      Disks must be numbered 0..n-1 with only disk 0 bootable.
+

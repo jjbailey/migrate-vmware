@@ -1,0 +1,57 @@
+---
+# playbooks/tasks/migration/aws/cleanup.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Best-effort cleanup for AWS-owned artifacts.
+
+- name: Cancel an unfinished AWS import task
+  amazon.aws.ec2_import_image:
+    state: absent
+    task_name: "{{ clone_name }}"
+    cancel_reason: "migrate-aws-vm.yml failed"
+    region: "{{ aws_region }}"
+  when:
+    - aws_import_cleanup_required | default(false) | bool
+  failed_when: false
+
+- name: Remove the staged OVA from S3
+  amazon.aws.s3_object:
+    bucket: "{{ s3_bucket }}"
+    object: "{{ s3_key }}"
+    mode: delobj
+    region: "{{ aws_region }}"
+  when:
+    - ova_upload is defined and ova_upload is succeeded
+    - (migration_succeeded | default(false) | bool) or (discard_failed_artifacts | bool)
+  failed_when: false
+
+- name: Report a retained AWS import artifact
+  ansible.builtin.debug:
+    msg: >-
+      Migration did not complete. The staged OVA was retained at
+      s3://{{ s3_bucket }}/{{ s3_key }} for a manual or follow-up import.
+      Set -e discard_failed_artifacts=true to delete it on failure.
+  when:
+    - ova_upload is defined and ova_upload is succeeded
+    - not (migration_succeeded | default(false) | bool)
+    - not (discard_failed_artifacts | bool)
+
+- name: Remove the local OVA
+  ansible.builtin.file:
+    path: "{{ ova_local_path }}"
+    state: absent
+  failed_when: false
+
+- name: Remove the empty local AWS artifact directory
+  ansible.builtin.command:
+    argv:
+      - rmdir
+      - "{{ aws_migration_run_dir }}"
+  changed_when: aws_artifact_directory_cleanup.rc == 0
+  failed_when: false
+  register: aws_artifact_directory_cleanup
+  when:
+    # Only the per-run directory this play derived is ours to remove. An
+    # operator-supplied migration_run_dir is theirs and stays put.
+    - migration_run_dir is not defined
+

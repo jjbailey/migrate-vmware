@@ -1,0 +1,21 @@
+---
+# playbooks/tasks/migration/openstack/cleanup.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Best-effort cleanup for OpenStack-owned artifacts.
+
+- name: Remove OpenStack images uploaded by this failed run
+  openstack.cloud.image:
+    auth: "{{ openstack_auth }}"
+    region_name: "{{ openstack_region_name }}"
+    name: "{{ item }}"
+    state: absent
+  loop: "{{ openstack_uploaded_image_names | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when:
+    - not (migration_succeeded | default(false) | bool)
+    - discard_failed_artifacts | bool
+  no_log: true
+  failed_when: false
+

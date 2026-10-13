@@ -1,0 +1,22 @@
+---
+# playbooks/vars/aws-common.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Shared by every AWS entry playbook (bootstrap-aws-import.yml,
+# launch-aws-instance.yml, migrate-aws-vm.yml).
+
+# Export vault-held AWS credentials into every task's environment so the
+# boto3-based amazon.aws modules and the aws CLI pick them up. Empty vault
+# entries are skipped so ~/.aws or an instance profile can still satisfy auth.
+#
+# This must stay a lazily evaluated var, not a set_fact: each play applies it
+# through a play-level `environment:`, which is templated for every task -
+# including the preflight tasks that run before select-project.yml has set
+# aws_profile and the key facts. The default('') guards make it evaluate to {}
+# until then. aws/preflight.yml warns when it is still empty after selection.
+aws_task_env: >-
+  {{ ({'AWS_PROFILE': aws_profile} if (aws_profile | default('')) | length > 0 else {})
+     | combine({'AWS_ACCESS_KEY_ID': aws_access_key_id, 'AWS_SECRET_ACCESS_KEY': aws_secret_access_key}
+               if (aws_access_key_id | default('')) | length > 0 and (aws_secret_access_key | default('')) | length > 0 else {})
+     | combine({'AWS_SESSION_TOKEN': aws_session_token} if (aws_session_token | default('')) | length > 0 else {}) }}
+

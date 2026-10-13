@@ -1,0 +1,161 @@
+---
+# playbooks/tasks/migration/openstack/select-project.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Resolve one OpenStack project from the multi-project vault.
+#
+# vaults/openstack.yml holds every project at once so no vault swap is needed:
+#
+#   openstack_projects:
+#     my-project-a:
+#       auth_url: "https://keystone.example.com:5000/v3"
+#       username: "my-username"
+#       password: "my-password"
+#       project_name: my-project-a
+#       project_id: "9876543210123456"  # optional but recommended for
+#         ID-scoped clouds
+#       user_domain_name: "Default"
+#       project_domain_name: "Default"
+#       # region_name: "my-region"  # only needed for multi-region clouds
+#     my-project-b:
+#       ...
+#
+# Numeric project IDs work quoted or unquoted: keys are compared as strings,
+# and -e openstack_target_project=<name-or-id> matches a vault key, a
+# project_name, or a project_id. A legacy single-project vault holding only
+# openstack_auth still works unmodified: with no explicit target the legacy
+# mapping is used as-is even when openstack_projects is also present.
+# A single-entry openstack_projects map is auto-selected when nothing is
+# requested; several entries with no request (and no legacy auth) fail and
+# ask for -e openstack_target_project.
+#
+# Outputs: openstack_auth (module-ready mapping), openstack_target_project_name
+# (string key), openstack_auth_project_id (project_id or project_name),
+# openstack_region_name (possibly empty; callers pass it through and the
+# OpenStack modules tolerate an empty region on single-region clouds).
+
+- name: Include the OpenStack vault variables
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../vaults/openstack.yml"
+  no_log: true
+
+- name: Determine whether a target project was explicitly requested
+  ansible.builtin.set_fact:
+    openstack_target_project_explicit: "{{ openstack_target_project is defined and (openstack_target_project | string | trim | length > 0) }}"
+    openstack_target_project_requested: "{{ (openstack_target_project | string | trim) if openstack_target_project is defined else '' }}"
+
+- name: Index OpenStack projects by stringified key
+  ansible.builtin.set_fact:
+    openstack_projects_by_key: "{{ openstack_projects_by_key | default({}) | combine({(item.key | string): item.value}) }}"
+  loop: "{{ openstack_projects | default({}) | dict2items }}"
+  when: openstack_projects is defined
+  no_log: true
+
+- name: Select the auth mapping for the requested project
+  ansible.builtin.set_fact:
+    openstack_auth: "{{ item.value }}"
+    openstack_target_project_name: "{{ item.key }}"
+    openstack_auth_from_map: true
+  loop: "{{ openstack_projects_by_key | default({}) | dict2items }}"
+  when:
+    - openstack_target_project_explicit | bool
+    - openstack_target_project_name is not defined
+    - openstack_target_project_requested in [item.key, (item.value.project_name | default('') | string), (item.value.project_id | default('') | string)]
+    - openstack_auth_from_map is not defined
+  no_log: true
+
+- name: Fail when the requested project matches nothing in the vault
+  ansible.builtin.fail:
+    msg: >-
+      OpenStack project '{{ openstack_target_project_requested }}' matches no
+      vault key, project_name, or project_id in vaults/openstack.yml under
+      openstack_projects.
+      Available: {{ openstack_projects_by_key | default({}) | list | join(', ') or '<none>' }}.
+  when:
+    - openstack_target_project_explicit | bool
+    - openstack_target_project_name is not defined
+
+- name: Record the legacy target project when none was requested
+  ansible.builtin.set_fact:
+    openstack_target_project_name: "{{ openstack_auth.project_name | string }}"
+    openstack_auth_from_map: false
+  when:
+    - not (openstack_target_project_explicit | bool)
+    - openstack_target_project_name is not defined
+    - openstack_auth is defined
+    - (openstack_auth.project_name | default('') | string | trim | length > 0)
+
+- name: Auto-select the only vault project when none was requested
+  ansible.builtin.set_fact:
+    openstack_auth: "{{ (openstack_projects_by_key | dict2items | first).value }}"
+    openstack_target_project_name: "{{ (openstack_projects_by_key | dict2items | first).key }}"
+    openstack_auth_from_map: true
+  when:
+    - not (openstack_target_project_explicit | bool)
+    - openstack_target_project_name is not defined
+    - openstack_projects_by_key is defined
+    - openstack_projects_by_key | length == 1
+  no_log: true
+
+- name: Fail when no OpenStack project is selected
+  ansible.builtin.fail:
+    msg: >-
+      No OpenStack project selected. Pass -e
+      openstack_target_project=<name> matching a key, project_name, or
+      project_id in openstack_projects, or define openstack_auth for the legacy
+      single-project vault.
+  when: openstack_target_project_name is not defined or openstack_target_project_name | length == 0
+
+- name: Assert the OpenStack auth mapping exists
+  ansible.builtin.assert:
+    that:
+      - openstack_auth is defined
+      - openstack_auth.auth_url is defined and openstack_auth.auth_url | length > 0
+      - openstack_auth.username is defined and (openstack_auth.username | string | trim | length) > 0
+      - openstack_auth.password is defined and (openstack_auth.password | string | trim | length) > 0
+      - openstack_auth.project_name is defined and (openstack_auth.project_name | string | trim | length) > 0
+    fail_msg: >-
+      vaults/openstack.yml must define openstack_auth with auth_url,
+      username, password, and project_name, or an openstack_projects entry
+      with the same keys.
+  no_log: true
+
+- name: Normalize the OpenStack project identity to strings
+  ansible.builtin.set_fact:
+    openstack_target_project_name: "{{ openstack_target_project_name | string }}"
+    openstack_auth_project_id: "{{ openstack_auth.project_id | default(openstack_auth.project_name) | string }}"
+  no_log: true
+
+- name: Fail when the vault key and project_name disagree
+  ansible.builtin.fail:
+    msg: >-
+      openstack_projects['{{ openstack_target_project_name }}'] sets
+      project_name '{{ openstack_auth.project_name }}', which does not match
+      its key. Fix the vault so the key and project_name agree.
+  when:
+    - openstack_auth_from_map | default(false) | bool
+    - (openstack_auth.project_name | string) != (openstack_target_project_name | string)
+
+- name: Select the OpenStack service region
+  ansible.builtin.set_fact:
+    openstack_region_name: "{{ (openstack_auth.region_name | default(lookup('ansible.builtin.env', 'OS_REGION_NAME'), true) | string | trim) }}"
+
+- name: Remove module-only region from the auth mapping
+  ansible.builtin.set_fact:
+    openstack_auth: >-
+      {{ openstack_auth
+         | dict2items
+         | rejectattr("key", "equalto", "region_name")
+         | list
+         | items2dict }}
+  no_log: true
+
+- name: Warn when no OpenStack region resolved
+  ansible.builtin.debug:
+    msg: >-
+      No OpenStack region resolved for project
+      '{{ openstack_target_project_name }}'. Single-region clouds usually
+      tolerate this; multi-region clouds require region_name in the vault
+      entry or OS_REGION_NAME in the environment.
+  when: openstack_region_name | length == 0
+

@@ -1,0 +1,42 @@
+---
+# playbooks/tasks/migration/common/load-manifest.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Persist the artifact manifest on a fresh run, restore it on a resume, and
+# check that every disk carries a usable capacity. Identical for every target,
+# which is why it lives here rather than in each target's prepare-disks.yml.
+
+- name: Persist the artifact manifest
+  ansible.builtin.copy:
+    content: "{{ artifact_manifest | to_nice_json }}"
+    dest: "{{ artifact_manifest_path }}"
+    mode: "0600"
+  when: not (migration_resume_mode | bool)
+
+- name: Load the resumable artifact manifest
+  ansible.builtin.slurp:
+    src: "{{ artifact_manifest_path }}"
+  register: artifact_manifest_file
+  when: migration_resume_mode | bool
+
+- name: Restore the artifact manifest
+  ansible.builtin.set_fact:
+    artifact_manifest: "{{ artifact_manifest_file.content | b64decode | from_json }}"
+  when: migration_resume_mode | bool
+
+- name: Verify the disk order in the artifact manifest
+  ansible.builtin.import_tasks: validate-disk-order.yml
+
+- name: Validate disk capacities in the artifact manifest
+  ansible.builtin.assert:
+    that:
+      - item.capacity_bytes is defined
+      - item.capacity_bytes is number
+      - item.capacity_bytes | int > 0
+    fail_msg: >-
+      Disk {{ item.index }} has no usable capacity_bytes in the artifact
+      manifest; cannot size its {{ migration_target }} storage.
+  loop: "{{ artifact_manifest.disks }}"
+  loop_control:
+    label: "disk {{ item.index }}"
+

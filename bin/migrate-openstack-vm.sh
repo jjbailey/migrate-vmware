@@ -1,0 +1,36 @@
+#!/bin/bash
+# bin/migrate-openstack-vm.sh
+# vim: set tabstop=4 shiftwidth=4 expandtab:
+
+set -euo pipefail
+wrapper_name=migrate-openstack-vm
+export wrapper_name
+wrapper_extra_args=()
+# shellcheck source=wrapper-common.sh
+# shellcheck disable=SC1091
+source "$(CDPATH='' builtin cd -- "$(dirname -- "${BASH_SOURCE[0]}")" > /dev/null && builtin pwd -P)/wrapper-common.sh"
+wrapper_capture_args "$@"
+
+VSPHERE_TARGET_VCENTER=${VSPHERE_TARGET_VCENTER:-}
+VCENTER_DATACENTER=${VCENTER_DATACENTER:-}
+VM_NAME=${VM_NAME:-}
+VALIDATE_CERTS=${VALIDATE_CERTS:-}
+QUIESCE_SNAPSHOT=${QUIESCE_SNAPSHOT:-true}
+OS_PROJECT_NAME=${OS_PROJECT_NAME:-}
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-/work/migrate-vmware}
+
+wrapper_require_bool VALIDATE_CERTS "$VALIDATE_CERTS"
+wrapper_require_bool QUIESCE_SNAPSHOT "$QUIESCE_SNAPSHOT"
+
+args=()
+[ -n "$VM_NAME" ] && args+=(-e "vm_name=$VM_NAME")
+[ -n "$VSPHERE_TARGET_VCENTER" ] && args+=(-e "vsphere_target_vcenter=$VSPHERE_TARGET_VCENTER")
+if [ -z "$VSPHERE_TARGET_VCENTER" ] && [ -n "$VCENTER_DATACENTER" ] ; then
+    args+=(-e "datacenter=$VCENTER_DATACENTER")
+fi
+[ -n "$VALIDATE_CERTS" ] && args+=(-e "validate_certs=$VALIDATE_CERTS")
+args+=(-e "quiesce_snapshot=$QUIESCE_SNAPSHOT")
+[ -n "$OS_PROJECT_NAME" ] && args+=(-e "openstack_target_project=$OS_PROJECT_NAME")
+[ -n "$ARTIFACT_ROOT" ] && args+=(-e "artifact_root=$ARTIFACT_ROOT")
+
+wrapper_run_playbook playbooks/migrate-openstack-vm.yml "${args[@]}" "${wrapper_extra_args[@]}" -v

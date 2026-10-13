@@ -1,0 +1,16 @@
+---
+# playbooks/tasks/migration/openstack/record-image.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Append one disk's image to the catalog lists. Driven from the manifest rather
+# than from the upload order so the lists stay in disk order even when some
+# disks were already present in Glance.
+
+- name: Record this disk image ID and name
+  ansible.builtin.set_fact:
+    openstack_image_ids: >-
+      {{ openstack_image_ids + [openstack_disk_image_ids[openstack_disk.index | string]] }}
+    openstack_image_names: >-
+      {{ openstack_image_names +
+         [openstack_image_prefix ~ '-disk-' ~ openstack_disk.index] }}
+

@@ -1,0 +1,28 @@
+---
+# playbooks/tasks/migration/common/build-migration-entry.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Assemble migration_entry, the row every target writes to the shared migration
+# catalog. The source provenance and the migrated_at stamp are the same for all
+# three targets and are defined only here, so a consumer reading rows from any
+# provider sees the same keys. Each <target>/build-catalog-entry.yml imports this
+# file and passes its own fields as migration_entry_fields.
+#
+# Key order is the order written to the catalog (the writer does not sort
+# keys): provenance, then the target's fields in the order given, then
+# migrated_at.
+
+- name: Build the migration catalog entry for {{ migration_target }}
+  ansible.builtin.set_fact:
+    migration_entry: >-
+      {{ migration_entry_provenance
+         | combine(migration_entry_fields, {'migrated_at': now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ')}) }}
+  vars:
+    migration_entry_provenance:
+      vm_name: "{{ vm_name }}"
+      source_vcenter: "{{ vcenter_hostname }}"
+      source_vcenter_key: "{{ vsphere_target_name | default('') }}"
+      source_datacenter: "{{ datacenter }}"
+      clone_name: "{{ clone_name }}"
+      snapshot_name: "{{ snapshot_name }}"
+

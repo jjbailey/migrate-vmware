@@ -1,0 +1,20 @@
+---
+# playbooks/tasks/migration/openstack/preflight.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# OpenStack credentials and prerequisites.
+#
+# Supports many projects at once: vaults/openstack.yml holds an
+# openstack_projects mapping and one run selects a single project with
+# -e openstack_target_project=<name>. A legacy vault holding only
+# openstack_auth still works unmodified.
+
+- name: Select the OpenStack project for this run
+  ansible.builtin.import_tasks: select-project.yml
+
+- name: Check qemu-img
+  ansible.builtin.command: "{{ qemu_img_bin }} --version"
+  register: qemu_img_check
+  failed_when: qemu_img_check.rc != 0
+  changed_when: false
+

@@ -1,0 +1,192 @@
+---
+# playbooks/launch-aws-instance.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Launches an EC2 instance from an AMI produced by migrate-aws-vm.yml. By default
+# it looks up the most recent completed migration for vm_name in
+# catalogs/migration-catalog.json (via bin/lookup-migration-ami.py); pass an
+# explicit ami_id to skip that lookup and launch a specific AMI instead.
+#
+# The AWS region and credentials come from vaults/aws.yml (see README.md
+# "Secrets"); -e/--extra-vars still override any of them.
+
+- name: Launch an EC2 instance from a migrated AMI
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment: "{{ aws_task_env }}"
+
+  vars_files:
+    - vars/aws-common.yml
+
+  vars:
+    vm_name: "my-vm"
+    ami_id: ""
+
+    instance_type: "t3.medium"
+    vpc_subnet_id: ""
+    security_groups: []
+    key_name: ""
+    assign_public_ip: true
+    instance_name: "{{ vm_name }}"
+    extra_tags: {}
+
+    migration_catalog_path: "{{ playbook_dir }}/../catalogs/migration-catalog.json"
+    deployment_catalog_path: "{{ playbook_dir }}/../catalogs/deployment-catalog.json"
+
+  tasks:
+    # Bare -e key=[...] arrives as a string, and Ansible extra-vars cannot be
+    # overridden by set_fact. Decode list-shaped inputs into the `aws` mapping
+    # (not an extra-var) and use aws.* for the rest of this play. Same idiom as
+    # the OpenStack launch play.
+    - name: Normalize AWS list-shaped extra-vars
+      ansible.builtin.set_fact:
+        aws:
+          security_groups: "{{ security_groups | from_yaml if (security_groups is string) else security_groups }}"
+
+    - name: Require normalized AWS list inputs
+      ansible.builtin.assert:
+        that:
+          - aws.security_groups is sequence
+          - aws.security_groups is not string
+        fail_msg: >-
+          security_groups must be a list. Pass it as JSON, either
+          -e '{"security_groups": ["sg-..."]}' or
+          -e security_groups='["sg-..."]'.
+
+    - name: Select the AWS project for this run
+      ansible.builtin.include_tasks: tasks/migration/aws/select-project.yml
+
+    - name: Check for a local AWS credentials file fallback
+      ansible.builtin.stat:
+        path: "{{ '~/.aws/credentials' | expanduser }}"
+      register: aws_cred_file
+
+    - name: Warn if AWS credentials are neither in the vault nor in ~/.aws
+      ansible.builtin.debug:
+        msg: >-
+          No AWS credentials resolved: vaults/aws.yml has an empty
+          aws_secret_access_key and ~/.aws/credentials is absent. AWS tasks
+          will fail unless an instance profile provides credentials - run
+          ansible-vault edit vaults/aws.yml to add the secret key.
+      when:
+        - aws_task_env | length == 0
+        - not aws_cred_file.stat.exists
+
+    - name: Look up the AMI from the migration catalog
+      when: ami_id | length == 0
+      block:
+        - name: Query the migration catalog for vm_name
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ playbook_dir }}/../bin/lookup-migration-ami.py"
+              - --catalog
+              - "{{ migration_catalog_path }}"
+              - --vm-name
+              - "{{ vm_name }}"
+              - --project
+              - "{{ aws_account_id if (aws_account_id | length > 0) else aws_target_project_name }}"
+              - --region
+              - "{{ aws_region }}"
+          register: ami_lookup
+          changed_when: false
+
+        - name: Resolve ami_id and import_task_id from the lookup
+          ansible.builtin.set_fact:
+            ami_id: "{{ (ami_lookup.stdout | from_json).ami_id }}"
+            source_import_task_id: "{{ (ami_lookup.stdout | from_json).import_task_id }}"
+            source_aws_region: "{{ (ami_lookup.stdout | from_json).aws_region }}"
+
+    - name: Record that ami_id was supplied explicitly (no catalog lookup)
+      when: source_import_task_id is not defined
+      ansible.builtin.set_fact:
+        source_import_task_id: "manual"
+
+    - name: Verify the AMI is in the configured AWS region
+      ansible.builtin.assert:
+        that:
+          - source_aws_region == aws_region
+        fail_msg: >-
+          The catalog AMI belongs to {{ source_aws_region }}, but the configured
+          AWS region is {{ aws_region }}. Pass the matching aws_region or select
+          an AMI migrated to this region.
+      when: source_aws_region is defined
+
+    - name: Fail if no AMI could be resolved
+      ansible.builtin.fail:
+        msg: "No ami_id resolved for vm_name={{ vm_name }} - pass ami_id explicitly or run migrate-aws-vm.yml first"
+      when: ami_id | length == 0
+
+    - name: Require an AWS subnet
+      ansible.builtin.assert:
+        that:
+          - vpc_subnet_id is string
+          - vpc_subnet_id | length > 0
+        fail_msg: "Provide vpc_subnet_id (or AWS_SUBNET_ID) before launching an AWS instance"
+
+    - name: Launch the instance
+      amazon.aws.ec2_instance:
+        name: "{{ instance_name }}"
+        image_id: "{{ ami_id }}"
+        instance_type: "{{ instance_type }}"
+        vpc_subnet_id: "{{ vpc_subnet_id }}"
+        security_groups: "{{ aws.security_groups }}"
+        key_name: "{{ key_name if key_name | length > 0 else omit }}"
+        network_interfaces:
+          - assign_public_ip: "{{ assign_public_ip }}"
+        tags: "{{ {'MigratedFrom': vm_name, 'SourceImportTaskId': source_import_task_id} | combine(extra_tags) }}"
+        region: "{{ aws_region }}"
+        state: running
+        wait: true
+      register: launch_result
+
+    - name: Show the launched instance
+      ansible.builtin.debug:
+        msg: "{{ launch_result.instances[0] }}"
+
+    - name: Add the AWS deployment to the catalog
+      block:
+        - name: Build the AWS deployment catalog entry
+          ansible.builtin.set_fact:
+            aws_deployment_entry:
+              vm_name: "{{ vm_name }}"
+              target_platform: aws
+              ami_id: "{{ ami_id }}"
+              import_task_id: "{{ source_import_task_id }}"
+              instance_id: "{{ launch_result.instances[0].instance_id }}"
+              instance_type: "{{ instance_type }}"
+              aws_region: "{{ aws_region }}"
+              vpc_subnet_id: "{{ vpc_subnet_id }}"
+              status: "{{ launch_result.instances[0].state.name | default('running') }}"
+              launched_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+
+        - name: Add AWS account scope to the deployment catalog entry
+          ansible.builtin.set_fact:
+            aws_deployment_entry: "{{ aws_deployment_entry | combine({'aws_account_id': aws_account_id}) }}"
+          when: aws_account_id | default('') | length > 0
+
+        - name: Prepare deployment catalog entry
+          ansible.builtin.copy:
+            content: "{{ aws_deployment_entry | to_json }}"
+            dest: "/tmp/.{{ launch_result.instances[0].instance_id }}.deployment-entry.json"
+            mode: "0600"
+
+        - name: Record the deployment in the deployment catalog
+          ansible.builtin.command:
+            argv:
+              - python3
+              - "{{ playbook_dir }}/../bin/append-deployment-catalog.py"
+              - --catalog
+              - "{{ deployment_catalog_path }}"
+              - --entry
+              - "/tmp/.{{ launch_result.instances[0].instance_id }}.deployment-entry.json"
+          changed_when: true
+
+      always:
+        - name: Remove temporary catalog entry file
+          ansible.builtin.file:
+            path: "/tmp/.{{ launch_result.instances[0].instance_id | default('aws-instance') }}.deployment-entry.json"
+            state: absent
+          failed_when: false
+

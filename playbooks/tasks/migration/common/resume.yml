@@ -1,0 +1,55 @@
+---
+# playbooks/tasks/migration/common/resume.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Validate the persistent OVF inputs needed to resume an import. Every target
+# that exports an OVF package resumes from the same two artifacts: the
+# descriptor and the manifest beside it.
+
+- name: Check resumable OVF and manifest
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ ovf_local_path }}"
+    - "{{ artifact_manifest_path }}"
+  register: resume_artifacts
+  when: migration_resume_mode | bool
+
+- name: Fail if a resumable artifact is missing
+  ansible.builtin.fail:
+    msg: >-
+      Resume run {{ migration_run_id }} is missing {{ item.item }}.
+      Keep the persistent migration directory or start a new run.
+  loop: "{{ resume_artifacts.results | default([]) }}"
+  when:
+    - migration_resume_mode | bool
+    - not item.stat.exists
+
+- name: Load the resumable OVF manifest for file checks
+  ansible.builtin.slurp:
+    src: "{{ artifact_manifest_path }}"
+  register: resume_manifest_file
+  when: migration_resume_mode | bool
+
+- name: Restore the resumable OVF manifest
+  ansible.builtin.set_fact:
+    artifact_manifest: "{{ resume_manifest_file.content | b64decode | from_json }}"
+  when: migration_resume_mode | bool
+
+- name: Check every resumable OVF disk
+  ansible.builtin.stat:
+    path: "{{ migration_run_dir }}/{{ item.path }}"
+  loop: "{{ artifact_manifest.disks | default([]) }}"
+  register: resume_disk_artifacts
+  when: migration_resume_mode | bool
+
+- name: Fail if a resumable OVF disk is missing
+  ansible.builtin.fail:
+    msg: >-
+      Resume run {{ migration_run_id }} is missing OVF disk {{ item.item.path }}.
+      Keep the persistent migration directory or start a new run.
+  loop: "{{ resume_disk_artifacts.results | default([]) }}"
+  when:
+    - migration_resume_mode | bool
+    - not item.stat.exists
+

@@ -1,0 +1,72 @@
+---
+# playbooks/tasks/migration/gcp/import.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Prepare an isolated gcloud credential environment, then import every prepared
+# VMDK. Do not activate or revoke an account in the operator's normal gcloud
+# configuration.
+#
+# The import runs in three phases rather than one disk at a time. M2VM image
+# imports are independent server-side jobs, so starting them all before waiting
+# on any makes total import time the slowest disk instead of the sum of every
+# disk. Only the staging uploads stay sequential: they share one network link,
+# and gcloud already parallelizes each individual upload.
+
+- name: Create a temporary file for the service account key
+  ansible.builtin.tempfile:
+    state: file
+    suffix: .json
+  register: gcp_sa_key_file
+
+- name: Write the service account key to the temporary file
+  ansible.builtin.copy:
+    content: "{{ service_account_key }}"
+    dest: "{{ gcp_sa_key_file.path }}"
+    mode: "0600"
+  no_log: true
+
+- name: Configure gcloud to use only the temporary service-account key
+  ansible.builtin.set_fact:
+    gcp_gcloud_env:
+      CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: "{{ gcp_sa_key_file.path }}"
+  no_log: true
+
+- name: Plan the staging object and image name for every disk
+  # Deriving both names once removes the need for each phase to recompute them
+  # from a loop position, so no phase depends on another phase's iteration order.
+  ansible.builtin.set_fact:
+    gcp_disk_plan: >-
+      {{ gcp_disk_plan | default([]) + [{
+        'index': item.index,
+        'path': item.path,
+        'object': gcs_prefix ~ '/disk-' ~ item.index ~ '.vmdk',
+        'image': gcp_image_prefix ~ '-disk-' ~ item.index,
+        'is_boot': gcp_plan_position == 0,
+      }] }}
+  loop: "{{ artifact_manifest.disks }}"
+  loop_control:
+    index_var: gcp_plan_position
+    label: "disk {{ item.index }} ({{ 'boot' if gcp_plan_position == 0 else 'data' }})"
+
+- name: Stage each disk in the GCS bucket
+  ansible.builtin.include_tasks: stage-disk.yml
+  loop: "{{ gcp_disk_plan }}"
+  loop_control:
+    loop_var: gcp_disk
+    label: "disk {{ gcp_disk.index }} -> gs://{{ gcs_bucket }}/{{ gcp_disk.object }}"
+
+- name: Start every image import
+  ansible.builtin.include_tasks: start-import.yml
+  loop: "{{ gcp_disk_plan }}"
+  loop_control:
+    loop_var: gcp_disk
+    label: "disk {{ gcp_disk.index }} ({{ 'boot' if gcp_disk.is_boot else 'data' }})"
+  when: gcp_disk.image not in gcp_reused_image_names
+
+- name: Wait for every image import to finish
+  ansible.builtin.include_tasks: finish-import.yml
+  loop: "{{ gcp_disk_plan }}"
+  loop_control:
+    loop_var: gcp_disk
+    label: "disk {{ gcp_disk.index }} ({{ gcp_disk.image }})"
+

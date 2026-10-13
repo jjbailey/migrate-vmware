@@ -1,0 +1,16 @@
+---
+# playbooks/tasks/migration/openstack/prepare-disks.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Settle the shared manifest, then prepare the staging directory. Each disk's
+# VMDK is verified by convert-disk.yml immediately before its conversion.
+
+- name: Settle the artifact manifest
+  ansible.builtin.import_tasks: ../common/load-manifest.yml
+
+- name: Create the OpenStack conversion staging directory
+  ansible.builtin.file:
+    path: "{{ openstack_staging_dir }}"
+    state: directory
+    mode: "0700"
+

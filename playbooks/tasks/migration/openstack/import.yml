@@ -1,0 +1,42 @@
+---
+# playbooks/tasks/migration/openstack/import.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Import every prepared disk into Glance.
+#
+# Resolving which disks already have a Glance image before converting anything
+# lets the convert/upload loop run one conversion ahead of the disk it is
+# uploading: qemu-img is bound by local CPU and disk while the Glance upload is
+# bound by the network, so overlapping them hides the shorter of the two on
+# every disk after the first. Peak staging space is two qcow2 files instead of
+# one, which is why the lookahead is exactly one disk and not the whole set.
+
+- name: Resolve which disks already have a Glance image
+  ansible.builtin.include_tasks: check-image.yml
+  loop: "{{ artifact_manifest.disks }}"
+  loop_control:
+    loop_var: openstack_disk
+    label: "disk {{ openstack_disk.index }}"
+
+- name: Report the disks that still need conversion
+  ansible.builtin.debug:
+    msg: >-
+      {{ openstack_pending_disks | length }} of
+      {{ artifact_manifest.disks | length }} disk(s) need conversion and upload;
+      {{ openstack_disk_image_ids | length }} already present in Glance.
+
+- name: Convert and upload each remaining disk
+  ansible.builtin.include_tasks: import-disk.yml
+  loop: "{{ openstack_pending_disks }}"
+  loop_control:
+    loop_var: openstack_disk
+    index_var: openstack_pending_position
+    label: "disk {{ openstack_disk.index }}"
+
+- name: Record every disk image in manifest order
+  ansible.builtin.include_tasks: record-image.yml
+  loop: "{{ artifact_manifest.disks }}"
+  loop_control:
+    loop_var: openstack_disk
+    label: "disk {{ openstack_disk.index }}"
+

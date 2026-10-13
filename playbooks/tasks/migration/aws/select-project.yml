@@ -1,0 +1,108 @@
+---
+# playbooks/tasks/migration/aws/select-project.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Select one AWS account/project from vaults/aws.yml.
+# Supports aws_projects plus the legacy flat AWS mapping.
+
+- name: Include the AWS vault variables
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../vaults/aws.yml"
+  no_log: true
+
+- name: Determine whether an AWS target project was explicitly requested
+  ansible.builtin.set_fact:
+    aws_target_project_explicit: "{{ aws_target_project is defined and (aws_target_project | string | trim | length > 0) }}"
+    aws_target_project_requested: "{{ (aws_target_project | string | trim) if aws_target_project is defined else '' }}"
+
+- name: Index AWS projects by stringified key
+  ansible.builtin.set_fact:
+    aws_projects_by_key: "{{ aws_projects_by_key | default({}) | combine({(item.key | string): item.value}) }}"
+  loop: "{{ aws_projects | default({}) | dict2items }}"
+  when: aws_projects is defined
+  no_log: true
+
+- name: Select the requested AWS project
+  ansible.builtin.set_fact:
+    aws_project_config: "{{ item.value }}"
+    aws_target_project_name: "{{ item.key }}"
+  loop: "{{ aws_projects_by_key | default({}) | dict2items }}"
+  when:
+    - aws_target_project_explicit | bool
+    - aws_target_project_name is not defined
+    - aws_target_project_requested in [item.key, (item.value.aws_account_id | default(item.value.account_id, true) | default('') | string), (item.value.aws_profile | default('') | string)]
+  no_log: true
+
+- name: Fail when the requested AWS project matches nothing in the Vault
+  ansible.builtin.fail:
+    msg: >-
+      AWS project '{{ aws_target_project_requested }}' matches no vault key,
+      account ID, or profile in vaults/aws.yml under aws_projects.
+      Available: {{ aws_projects_by_key | default({}) | list | join(', ') or '<none>' }}.
+  when:
+    - aws_target_project_explicit | bool
+    - aws_target_project_name is not defined
+
+- name: Select the legacy AWS project when no target was requested
+  ansible.builtin.set_fact:
+    aws_project_config:
+      aws_region: "{{ aws_region }}"
+      s3_bucket: "{{ s3_bucket }}"
+      vmimport_role_name: "{{ vmimport_role_name }}"
+      aws_access_key_id: "{{ aws_access_key_id | default('') }}"
+      aws_secret_access_key: "{{ aws_secret_access_key | default('') }}"
+      aws_session_token: "{{ aws_session_token | default('') }}"
+    aws_target_project_name: "legacy"
+    aws_account_id: "{{ aws_account_id | default('') }}"
+  when:
+    - not (aws_target_project_explicit | bool)
+    - aws_target_project_name is not defined
+    - aws_region is defined
+    - (aws_region | string | trim | length) > 0
+    - s3_bucket is defined
+    - vmimport_role_name is defined
+
+- name: Auto-select the only AWS project when no target was requested
+  ansible.builtin.set_fact:
+    aws_project_config: "{{ (aws_projects_by_key | dict2items | first).value }}"
+    aws_target_project_name: "{{ (aws_projects_by_key | dict2items | first).key }}"
+  when:
+    - not (aws_target_project_explicit | bool)
+    - aws_target_project_name is not defined
+    - aws_projects_by_key is defined
+    - aws_projects_by_key | length == 1
+  no_log: true
+
+- name: Fail when no AWS project is selected
+  ansible.builtin.fail:
+    msg: >-
+      No AWS project selected. Pass -e aws_target_project=<name-or-account-id>
+      matching a key, account ID, or profile in aws_projects, or define the
+      legacy flat AWS mapping.
+  when: aws_target_project_name is not defined or (aws_target_project_name | string | length) == 0
+
+- name: Validate the selected AWS project configuration
+  ansible.builtin.assert:
+    that:
+      - aws_project_config is defined
+      - aws_project_config.aws_region is defined and (aws_project_config.aws_region | string | trim | length) > 0
+      - aws_project_config.s3_bucket is defined and (aws_project_config.s3_bucket | string | trim | length) > 0
+      - aws_project_config.vmimport_role_name is defined and (aws_project_config.vmimport_role_name | string | trim | length) > 0
+    fail_msg: >-
+      The selected AWS project must define aws_region, s3_bucket, and
+      vmimport_role_name.
+  no_log: true
+
+- name: Normalize the selected AWS project values
+  ansible.builtin.set_fact:
+    aws_region: "{{ aws_project_config.aws_region | string }}"
+    s3_bucket: "{{ aws_project_config.s3_bucket | string }}"
+    vmimport_role_name: "{{ aws_project_config.vmimport_role_name | string }}"
+    aws_access_key_id: "{{ aws_project_config.aws_access_key_id | default('') }}"
+    aws_secret_access_key: "{{ aws_project_config.aws_secret_access_key | default('') }}"
+    aws_session_token: "{{ aws_project_config.aws_session_token | default('') }}"
+    aws_profile: "{{ aws_project_config.aws_profile | default(aws_project_config.profile, true) | default('') }}"
+    aws_account_id: "{{ aws_project_config.aws_account_id | default(aws_project_config.account_id, true) | default((aws_target_project_name if (aws_target_project_name | string) is match('^[0-9]{12}$') else ''), true) | string }}"
+    aws_target_project_name: "{{ aws_target_project_name | string }}"
+  no_log: true
+

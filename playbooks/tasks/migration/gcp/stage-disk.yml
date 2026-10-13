@@ -1,0 +1,131 @@
+---
+# playbooks/tasks/migration/gcp/stage-disk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Phase one for one disk: put the VMDK in the staging bucket and settle what
+# should happen to any Compute image that already carries this disk's name.
+
+- name: Check whether this disk already exists in the staging bucket
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - storage
+      - ls
+      - "gs://{{ gcs_bucket }}/{{ gcp_disk.object }}"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_existing_object_check
+  changed_when: false
+  failed_when: >-
+    gcp_existing_object_check.rc != 0 and
+    (gcp_existing_object_check.stderr | lower) is not search(gcp_absent_object_pattern)
+
+- name: Upload this disk to the staging bucket
+  # gcloud storage splits a large object into parallel slices; the pure-Python
+  # storage module uploads a multi-gigabyte VMDK in one unresumable stream.
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - storage
+      - cp
+      - "{{ migration_run_dir }}/{{ gcp_disk.path }}"
+      - "gs://{{ gcs_bucket }}/{{ gcp_disk.object }}"
+      - "--project={{ gcp_project }}"
+  environment: "{{ gcp_gcloud_env }}"
+  changed_when: true
+  when: gcp_existing_object_check.rc != 0
+
+- name: Report reuse of an existing GCS staging object
+  ansible.builtin.debug:
+    msg: >-
+      Reusing existing GCS object gs://{{ gcs_bucket }}/{{ gcp_disk.object }}
+      for resumable disk {{ gcp_disk.index }}.
+  when: gcp_existing_object_check.rc == 0
+
+- name: Track the staged GCS object for cleanup
+  ansible.builtin.set_fact:
+    gcp_gcs_object_names: "{{ gcp_gcs_object_names + [gcp_disk.object] }}"
+
+- name: Check if a Compute image already exists for this disk
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - images
+      - describe
+      - "{{ gcp_disk.image }}"
+      - "--project={{ gcp_project }}"
+      - "--format=value(selfLink)"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_existing_image_check
+  changed_when: false
+  failed_when: >-
+    gcp_existing_image_check.rc != 0 and
+    (gcp_existing_image_check.stderr | lower) is not search(gcp_absent_resource_pattern)
+
+- name: Record an existing completed image as reusable during resume
+  ansible.builtin.set_fact:
+    gcp_reused_image_names: "{{ gcp_reused_image_names + [gcp_disk.image] }}"
+  when:
+    - migration_resume_mode | bool
+    - gcp_existing_image_check.rc == 0
+
+- name: Report reuse of an existing completed image
+  ansible.builtin.debug:
+    msg: >-
+      Reusing existing GCP image {{ gcp_disk.image }} during resume; skipping
+      deletion and M2VM re-import.
+  when: gcp_disk.image in gcp_reused_image_names
+
+- name: Refuse to overwrite an existing image when replacement is disabled
+  ansible.builtin.fail:
+    msg: >-
+      GCP image {{ gcp_disk.image }} already exists. Set
+      gcp_replace_existing_image=true to replace it.
+  when:
+    - gcp_existing_image_check.rc == 0
+    - gcp_disk.image not in gcp_reused_image_names
+    - not (gcp_replace_existing_image | bool)
+
+- name: Delete the existing image when replacement is enabled
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - images
+      - delete
+      - "{{ gcp_disk.image }}"
+      - "--project={{ gcp_project }}"
+      - --quiet
+  environment: "{{ gcp_gcloud_env }}"
+  changed_when: true
+  when:
+    - gcp_existing_image_check.rc == 0
+    - gcp_disk.image not in gcp_reused_image_names
+    - gcp_replace_existing_image | bool
+
+- name: Wait for the existing image deletion to complete
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - images
+      - describe
+      - "{{ gcp_disk.image }}"
+      - "--project={{ gcp_project }}"
+      - "--format=value(selfLink)"
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_deleted_image_check
+  until: >-
+    gcp_deleted_image_check.rc != 0 and
+    (gcp_deleted_image_check.stderr | lower) is search(gcp_absent_resource_pattern)
+  retries: "{{ gcp_delete_poll_retries | int }}"
+  delay: "{{ gcp_delete_poll_delay | int }}"
+  changed_when: false
+  failed_when: >-
+    gcp_deleted_image_check.rc != 0 and
+    (gcp_deleted_image_check.stderr | lower) is not search(gcp_absent_resource_pattern)
+  when:
+    - gcp_existing_image_check.rc == 0
+    - gcp_disk.image not in gcp_reused_image_names
+    - gcp_replace_existing_image | bool
+

@@ -1,0 +1,87 @@
+---
+# playbooks/tasks/migration/common/cleanup.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Best-effort cleanup shared by every target.
+
+# The resumable run directory. GCP and OpenStack always derive
+# migration_run_dir and can resume from it, so it is removed on success or
+# explicit discard, and otherwise kept with a resume hint. AWS does not resume:
+# it defines migration_run_dir only when an operator supplies one, which is
+# theirs and must not be deleted, and aws/cleanup.yml reports its retained S3
+# object instead. These run first, the same point in the always: sequence as
+# when they lived in each platform's cleanup.yml.
+- name: Remove persistent artifacts after success or explicit discard
+  ansible.builtin.file:
+    path: "{{ migration_run_dir }}"
+    state: absent
+  when:
+    - migration_target in ['gcp', 'openstack']
+    - (migration_succeeded | default(false) | bool) or (discard_failed_artifacts | bool)
+  failed_when: false
+
+- name: Report retained artifacts for a resumable failed run
+  ansible.builtin.debug:
+    msg: >-
+      Migration did not complete. Artifacts were retained at
+      {{ migration_run_dir }}. Resume with
+      -e resume_run_id={{ migration_run_id }} after correcting the failure.
+  when:
+    - migration_target in ['gcp', 'openstack']
+    - not (migration_succeeded | default(false) | bool)
+    - not (discard_failed_artifacts | bool)
+
+- name: Remove the temporary catalog entry
+  ansible.builtin.file:
+    path: "{{ catalog_entry_path }}"
+    state: absent
+  register: cleanup_catalog_entry
+  failed_when: false
+
+- name: Delete the temporary clone VM
+  community.vmware.vmware_guest:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs | bool }}"
+    datacenter: "{{ datacenter }}"
+    folder: "{{ source_vm_folder }}"
+    name: "{{ clone_name }}"
+    state: absent
+  when:
+    - clone_cleanup_required | default(false) | bool
+    - source_vm_folder is defined
+  no_log: true
+  register: cleanup_clone
+  failed_when: false
+
+- name: Remove the snapshot from the source VM
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ govc_bin }}"
+      - snapshot.remove
+      - "-vm={{ source_vm_path }}"
+      - "{{ snapshot_name }}"
+  when:
+    - snapshot_cleanup_required | default(false) | bool
+    - source_vm_path is defined
+  no_log: true
+  changed_when: true
+  register: cleanup_snapshot
+  failed_when: false
+
+- name: Warn about best-effort cleanup failures
+  ansible.builtin.debug:
+    msg: >-
+      Best-effort cleanup did not remove every vSphere/catalog artifact. Check
+      the run output and remove any remaining clone, snapshot, or temp file.
+  when: >-
+    (cleanup_catalog_entry.failed | default(false) | bool) or
+    (cleanup_clone.failed | default(false) | bool) or
+    (cleanup_snapshot.failed | default(false) | bool)
+

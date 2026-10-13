@@ -1,0 +1,55 @@
+---
+# playbooks/migrate-aws-vm.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Migrates one vSphere VM to an AWS AMI. The shared VMware task pipeline
+# creates a snapshot-backed clone and exports a validated OVA; AWS-specific
+# tasks then stage and import it.
+
+- name: Migrate a vSphere VM to AWS
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  environment: "{{ aws_task_env }}"
+
+  vars_files:
+    - vars/migration-common.yml
+    - vars/aws-common.yml
+
+  vars:
+    migration_target: aws
+
+    import_poll_retries: 120
+    import_poll_delay: 30
+
+  tasks:
+    - name: Run shared VMware preflight checks
+      ansible.builtin.import_tasks: tasks/migration/common/preflight.yml
+
+    - name: Run AWS preflight checks
+      ansible.builtin.import_tasks: tasks/migration/aws/preflight.yml
+
+    - name: Initialize the AWS migration
+      ansible.builtin.import_tasks: tasks/migration/aws/initialize.yml
+
+    - name: Execute the AWS migration
+      block:
+        - name: Export and inspect the source VM
+          ansible.builtin.import_tasks: tasks/migration/common/export-ova.yml
+
+        - name: Import the OVA into AWS
+          ansible.builtin.import_tasks: tasks/migration/aws/import.yml
+
+        - name: Build the AWS catalog entry
+          ansible.builtin.import_tasks: tasks/migration/aws/build-catalog-entry.yml
+
+        - name: Append the migration catalog entry
+          ansible.builtin.import_tasks: tasks/migration/common/append-catalog.yml
+
+      always:
+        - name: Clean up AWS resources
+          ansible.builtin.import_tasks: tasks/migration/aws/cleanup.yml
+
+        - name: Clean up shared migration resources
+          ansible.builtin.import_tasks: tasks/migration/common/cleanup.yml
+

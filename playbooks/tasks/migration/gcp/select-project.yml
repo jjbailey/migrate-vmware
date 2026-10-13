@@ -1,0 +1,113 @@
+---
+# playbooks/tasks/migration/gcp/select-project.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Select one GCP project from vaults/gcp.yml.
+# Supports gcp_projects plus the legacy top-level gcp_project mapping.
+
+- name: Include the GCP vault variables
+  ansible.builtin.include_vars:
+    file: "{{ playbook_dir }}/../vaults/gcp.yml"
+  no_log: true
+
+- name: Determine whether a GCP target project was explicitly requested
+  ansible.builtin.set_fact:
+    gcp_target_project_explicit: "{{ gcp_target_project is defined and (gcp_target_project | string | trim | length > 0) }}"
+    gcp_target_project_requested: "{{ (gcp_target_project | string | trim) if gcp_target_project is defined else '' }}"
+
+- name: Index GCP projects by stringified key
+  ansible.builtin.set_fact:
+    gcp_projects_by_key: "{{ gcp_projects_by_key | default({}) | combine({(item.key | string): item.value}) }}"
+  loop: "{{ gcp_projects | default({}) | dict2items }}"
+  when: gcp_projects is defined
+  no_log: true
+
+- name: Select the requested GCP project
+  ansible.builtin.set_fact:
+    gcp_project_config: "{{ item.value }}"
+    gcp_target_project_name: "{{ item.key }}"
+  loop: "{{ gcp_projects_by_key | default({}) | dict2items }}"
+  when:
+    - gcp_target_project_explicit | bool
+    - gcp_target_project_name is not defined
+    - gcp_target_project_requested in [item.key, (item.value.gcp_project | default('') | string), (item.value.project_id | default('') | string)]
+  no_log: true
+
+- name: Fail when the requested GCP project matches nothing in the Vault
+  ansible.builtin.fail:
+    msg: >-
+      GCP project '{{ gcp_target_project_requested }}' matches no vault key,
+      gcp_project, or project_id in vaults/gcp.yml under gcp_projects.
+      Available: {{ gcp_projects_by_key | default({}) | list | join(', ') or '<none>' }}.
+  when:
+    - gcp_target_project_explicit | bool
+    - gcp_target_project_name is not defined
+
+- name: Select the legacy GCP project when no target was requested
+  ansible.builtin.set_fact:
+    gcp_project_config:
+      gcp_project: "{{ gcp_project }}"
+      gcs_bucket: "{{ gcs_bucket }}"
+      gcp_import_location: "{{ gcp_import_location }}"
+      service_account_key: "{{ service_account_key }}"
+    gcp_target_project_name: "{{ gcp_project | string }}"
+  when:
+    - not (gcp_target_project_explicit | bool)
+    - gcp_target_project_name is not defined
+    - gcp_project is defined
+    - (gcp_project | string | trim | length) > 0
+
+- name: Auto-select the only GCP project when no target was requested
+  ansible.builtin.set_fact:
+    gcp_project_config: "{{ (gcp_projects_by_key | dict2items | first).value }}"
+    gcp_target_project_name: "{{ (gcp_projects_by_key | dict2items | first).key }}"
+  when:
+    - not (gcp_target_project_explicit | bool)
+    - gcp_target_project_name is not defined
+    - gcp_projects_by_key is defined
+    - gcp_projects_by_key | length == 1
+  no_log: true
+
+- name: Fail when no GCP project is selected
+  ansible.builtin.fail:
+    msg: >-
+      No GCP project selected. Pass -e gcp_target_project=<name-or-id>
+      matching a key, gcp_project, or project_id in gcp_projects, or define
+      the legacy top-level gcp_project mapping.
+  when: gcp_target_project_name is not defined or (gcp_target_project_name | string | length) == 0
+
+- name: Validate the selected GCP project configuration
+  ansible.builtin.assert:
+    that:
+      - gcp_project_config is defined
+      - gcp_project_config.gcp_project is defined and (gcp_project_config.gcp_project | string | trim | length) > 0
+      - gcp_project_config.gcs_bucket is defined and (gcp_project_config.gcs_bucket | string | trim | length) > 0
+      - gcp_project_config.gcp_import_location is defined and (gcp_project_config.gcp_import_location | string | trim | length) > 0
+      - gcp_project_config.service_account_key is defined and (gcp_project_config.service_account_key | string | trim | length) > 0
+      - (gcp_project_config.service_account_key | from_json).client_email is defined
+      - (gcp_project_config.service_account_key | from_json).client_email | length > 0
+    fail_msg: >-
+      The selected GCP project must define gcp_project, gcs_bucket,
+      gcp_import_location, and a service_account_key JSON document with
+      client_email.
+  no_log: true
+
+- name: Normalize the selected GCP project values
+  ansible.builtin.set_fact:
+    gcp_project: "{{ gcp_project_config.gcp_project | string }}"
+    gcs_bucket: "{{ gcp_project_config.gcs_bucket | string }}"
+    gcp_import_location: "{{ gcp_project_config.gcp_import_location | string }}"
+    service_account_key: "{{ gcp_project_config.service_account_key }}"
+    gcp_target_project_name: "{{ gcp_target_project_name | string }}"
+  no_log: true
+
+- name: Require the GCP project key and gcp_project to agree
+  ansible.builtin.fail:
+    msg: >-
+      gcp_projects['{{ gcp_target_project_name }}'] sets gcp_project
+      '{{ gcp_project }}', which does not match its key.
+  when:
+    - gcp_projects is defined
+    - gcp_target_project_explicit | bool or gcp_projects_by_key | length == 1
+    - (gcp_target_project_name | string) != (gcp_project | string)
+

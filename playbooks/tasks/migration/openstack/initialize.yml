@@ -1,0 +1,46 @@
+---
+# playbooks/tasks/migration/openstack/initialize.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Stable OpenStack names, persistent paths, and lifecycle state.
+
+- name: Generate or reuse the OpenStack migration run ID
+  ansible.builtin.set_fact:
+    migration_run_id: >-
+      {{ resume_run_id if (resume_run_id | length > 0) else lookup('pipe', 'python3 -c "import time; print(time.time_ns())"') }}
+    migration_resume_mode: "{{ resume_run_id | length > 0 }}"
+    migration_succeeded: false
+    snapshot_cleanup_required: false
+    clone_cleanup_required: false
+    openstack_uploaded_image_ids: []
+    openstack_uploaded_image_names: []
+    openstack_image_ids: []
+    openstack_image_names: []
+    # Keyed by manifest disk index so the catalog lists can be rebuilt in disk
+    # order regardless of which disks were converted in this run.
+    openstack_disk_image_ids: {}
+    openstack_pending_disks: []
+    openstack_convert_jobs: {}
+
+- name: Derive the persistent OpenStack run directory
+  ansible.builtin.set_fact:
+    migration_run_dir: >-
+      {{ artifact_root }}/openstack/{{ vm_name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/{{ migration_run_id }}
+
+- name: Derive OpenStack migration names and paths
+  ansible.builtin.set_fact:
+    snapshot_name: "ansible-openstack-export-snap-{{ migration_run_id }}"
+    clone_name: "{{ vm_name }}-openstack-export-clone-{{ migration_run_id }}"
+    ovf_local_path: "{{ migration_run_dir }}/export.ovf"
+    artifact_manifest_path: "{{ migration_run_dir }}/artifact-manifest.json"
+    openstack_staging_dir: "{{ migration_run_dir }}/disks"
+    openstack_image_prefix: "{{ vm_name }}-migration-{{ migration_run_id }}"
+    catalog_entry_path: >-
+      /tmp/.{{ vm_name }}-openstack-export-clone-{{ migration_run_id }}.catalog-entry.json
+
+- name: Create the persistent OpenStack run directory
+  ansible.builtin.file:
+    path: "{{ migration_run_dir }}"
+    state: directory
+    mode: "0700"
+
