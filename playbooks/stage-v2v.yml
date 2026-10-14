@@ -153,6 +153,18 @@
       register: vm_guest_info
       no_log: true
 
+    # The module matches the name across every datacenter. Require the VM the
+    # migration playbooks would pick, which searches /<datacenter>/vm only.
+    - name: Assert the VM is in the configured datacenter
+      ansible.builtin.assert:
+        that:
+          - (vm_guest_info.instance.hw_folder | default('') | string).startswith('/' ~ datacenter ~ '/vm')
+        fail_msg: >-
+          VM '{{ inventory_hostname }}' is in
+          '{{ vm_guest_info.instance.hw_folder | default('unknown') }}', not
+          datacenter '{{ datacenter }}'. Select the vCenter entry whose
+          datacenter holds this VM.
+
     - name: Determine whether the VM is Windows
       ansible.builtin.set_fact:
         vm_is_windows: >-
@@ -219,6 +231,14 @@
         - not vm_is_windows
         - centos_release is unreachable
 
+    - name: Report a reachable VM that is not CentOS
+      ansible.builtin.debug:
+        msg: "Skipping stage-v2v for '{{ inventory_hostname }}': not a CentOS guest."
+      when:
+        - not vm_is_windows
+        - centos_release is not unreachable
+        - centos_release.stdout_lines | first | default('') | trim != 'centos'
+
     - name: Stage stage-v2v service on CentOS only
       when:
         - not vm_is_windows
@@ -238,5 +258,5 @@
 
         - name: Register and enable stage-v2v.sh with chkconfig
           ansible.builtin.raw: chkconfig --add stage-v2v.sh && chkconfig stage-v2v.sh on
-          changed_when: false
+          changed_when: stage_v2v_copy is changed
 

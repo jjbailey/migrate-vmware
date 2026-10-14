@@ -49,6 +49,10 @@ configure_network_interface()
     [[ -z $nic ]] && nic="eth0"
 
     local ifconfig_path="/etc/sysconfig/network-scripts/ifcfg-$nic"
+    if [[ ! -f $ifconfig_path ]] ; then
+        echo "stage-v2v.sh: $ifconfig_path not found; leaving networking unchanged" >&2
+        return 1
+    fi
     grep -qi "BOOTPROTO=dhcp" "$ifconfig_path" && return
     cp -p -b "$ifconfig_path" "$ifconfig_path.orig"
 
@@ -67,8 +71,10 @@ main()
     if is_openstack && is_rhel_like ; then
         disable_udev_rule
         configure_network_interface
-        systemctl restart network
+        # Disable first so a failed restart cannot leave this running on every
+        # boot; the network settings are already written by this point.
         chkconfig stage-v2v.sh off
+        systemctl restart network
     fi
 }
 

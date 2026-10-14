@@ -25,7 +25,7 @@ Usage: $(basename -- "$0") -c vcenter -H vm [-a address] [-u ssh_username] [-k s
   -u username  SSH username (default: from the vault, else ansible's default)
   -k keyfile   SSH private key file (default: from the vault, else ssh-agent)
 EOF
-    exit 2
+    exit "${1:-2}"
 }
 
 vcenter_hostname=""
@@ -41,6 +41,7 @@ while getopts ":c:H:a:u:k:h" opt ; do
         a) ssh_address="$OPTARG" ;;
         u) ssh_username="$OPTARG" ;;
         k) ssh_private_key_file="$OPTARG" ;;
+        h) usage 0 ;;
         *) usage ;;
     esac
 done
@@ -49,6 +50,14 @@ shift $((OPTIND - 1))
 if [ -z "$vcenter_hostname" ] || [ -z "$inventory_hostname" ] ; then
     usage
 fi
+
+# The name goes into an INI inventory line, where whitespace would split it.
+case "$inventory_hostname$ssh_address" in
+    *[[:space:]]*)
+        echo "$(basename -- "$0"): VM name and address must not contain whitespace" >&2
+        exit 2
+        ;;
+esac
 
 inventory=$(mktemp)
 trap 'rm -f "$inventory"' EXIT

@@ -33,9 +33,7 @@ aws_projects:
 ```
 
 Select an account with `-e aws_target_project=<key-or-account-id>`. A
-single-entry map is auto-selected. The optional `ssh_*` keys may also be set flat at
-the top level or with `-e`, which override the selected entry; unset values fall
-back to the inventory, ssh-agent, or `~/.ssh/config`. A legacy flat mapping containing
+single-entry map is auto-selected. A legacy flat mapping containing
 `aws_region`, `s3_bucket`, and `vmimport_role_name` remains supported.
 
 ## GCP Vault
@@ -157,5 +155,7 @@ vsphere_projects:
 ```
 
 Select a vCenter with `-e vsphere_target_vcenter=<key-or-hostname>`. A
-single-entry map is auto-selected. The selected vCenter key is recorded in
+single-entry map is auto-selected. The optional guest-login `ssh_*` keys may also be set flat at
+the top level or with `-e`, which override the selected entry; unset values fall
+back to the inventory, ssh-agent, or `~/.ssh/config`. The selected vCenter key is recorded in
 image-catalog scope so same-named content libraries remain distinct.
