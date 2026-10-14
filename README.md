@@ -188,6 +188,14 @@ preflight, import, catalog fields, and artifact cleanup live under sibling
 `aws/`, `openstack/`, and `gcp/` directories, each of which reuses the common
 pipeline. Shared defaults are kept in `playbooks/vars/migration-common.yml`.
 
+## Documentation
+
+- [doc/vaults.md](doc/vaults.md) - vault file layouts in one place
+- [doc/workflow.md](doc/workflow.md) - illustrated migration workflow
+  ([SVG](doc/workflow.svg))
+- [migrate-vmware presentation](doc/migrate_vmware_presentation.pptx) - project presentation slides
+- [migrate-vmware presentation video](doc/migrate_vmware_presentation.mp4) - recorded video of the project presentation
+
 ## Repository Map
 
 - `bin/` contains the playbook runner, six environment-aware launch/migrate wrappers,
