@@ -20,9 +20,9 @@ flowchart LR
     VM["VMware"]
 
     subgraph RUNS["Separate Target Runs"]
-        AWSRUN["Snapshot / clone / export<br/>AWS run"]
-        OSRUN["Snapshot / clone / export<br/>OpenStack run"]
-        GCPRUN["Snapshot / clone / export<br/>GCP run"]
+        AWSRUN["AWS Run<br/>Snapshot / clone / export"]
+        OSRUN["OpenStack Run<br/>Snapshot / clone / export"]
+        GCPRUN["GCP Run<br/>Snapshot / clone / export"]
     end
 
     subgraph LANDINGS["Native Cloud Landings"]
