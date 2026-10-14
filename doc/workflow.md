@@ -10,6 +10,11 @@ migration catalog. The export manifest is target-neutral and may include
 ordered `source_mac_addresses` from vSphere for OpenStack launches that
 preserve network identity.
 
+CentOS 7 guests with static IP addresses can first be staged with
+`bin/stage-v2v.sh`, which installs a one-time boot script that switches the
+guest to DHCP. This is a separate, optional step before an OpenStack run and
+is not part of the diagram below.
+
 ```mermaid
 flowchart LR
     VM["VMware"]

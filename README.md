@@ -141,27 +141,32 @@ flow is illustrated in [doc/workflow.md](doc/workflow.md).
 3. **`playbooks/launch-aws-instance.yml`** - launches an EC2 instance from an
    AWS migration catalog entry.
 
-4. **`playbooks/migrate-openstack-vm.yml`** - exports a VMware VM as an OVF package, then converts and uploads one VMDK at a time as a separate Glance image.
+4. **`playbooks/stage-v2v.yml`** (optional, via `bin/stage-v2v.sh`) - run
+   before `migrate-openstack-vm.yml` on CentOS 7 guests with static IP
+   addresses, so they come up on DHCP in OpenStack (see "Staging CentOS 7
+   Guests for OpenStack" below).
+
+5. **`playbooks/migrate-openstack-vm.yml`** - exports a VMware VM as an OVF package, then converts and uploads one VMDK at a time as a separate Glance image.
    The first disk is the boot-disk candidate; the remaining images are data
    disks.
 
-5. **`playbooks/launch-openstack-instance.yml`** - creates an OpenStack server
+6. **`playbooks/launch-openstack-instance.yml`** - creates an OpenStack server
    from the latest completed OpenStack migration, using the first image as the
    boot disk and creating/attaching Cinder volumes for the remaining disks.
    Optional Neutron port pre-creation can preserve source MAC addresses and/or
    request fixed IPs (see "OpenStack Launch Networking" below).
 
-6. **`playbooks/migrate-gcp-vm.yml`** - exports a VMware VM as an OVF package,
+7. **`playbooks/migrate-gcp-vm.yml`** - exports a VMware VM as an OVF package,
    uploads each referenced VMDK to Cloud Storage, and imports each disk into Compute Engine
    through Migrate to Virtual Machines (`gcloud compute migration image-imports`).
    The first disk receives guest OS adaptation; data disks use the same image
    import API with adaptation skipped.
 
-7. **`playbooks/launch-gcp-instance.yml`** - launches a Compute Engine instance
+8. **`playbooks/launch-gcp-instance.yml`** - launches a Compute Engine instance
    from the latest completed GCP migration and creates/attaches persistent
    disks for the migrated data images.
 
-8. **`bin/reconcile-catalog-openstack.py`** - removes completed OpenStack
+9. **`bin/reconcile-catalog-openstack.py`** - removes completed OpenStack
    migration entries whose Glance images are gone, and active OpenStack
    deployment entries whose servers or data volumes are gone. When a server is
    missing but its pre-created network-identity ports remain, the dry-run output
@@ -169,13 +174,13 @@ flow is illustrated in [doc/workflow.md](doc/workflow.md).
    `--dry-run`, `--project-id`, region selection, and the same `--force` safety
    guard (one project per run).
 
-9. **`bin/reconcile-catalog-gcp.py`** - removes completed GCP migration entries
-   whose Compute Engine images are gone, and active GCP deployment entries
-   whose instances or data disks are gone. It supports `--dry-run`,
-   `--project-id`, and refuses unusually large removals unless `--force` is
-   supplied.
+10. **`bin/reconcile-catalog-gcp.py`** - removes completed GCP migration entries
+    whose Compute Engine images are gone, and active GCP deployment entries
+    whose instances or data disks are gone. It supports `--dry-run`,
+    `--project-id`, and refuses unusually large removals unless `--force` is
+    supplied.
 
-10. **`bin/reconcile-catalog-aws.py`** - removes completed AWS migration entries
+11. **`bin/reconcile-catalog-aws.py`** - removes completed AWS migration entries
     whose AMIs are gone, and active AWS deployment entries whose EC2 instances
     are gone or terminated. It supports `--dry-run`, region/profile selection,
     `--project-id`/`--account-id`, account verification, and the same `--force`
@@ -645,7 +650,9 @@ stage-v2v playbook installs a one-time, boot-time reconfigure script to do this.
 bin/stage-v2v.sh -c vcenter.example.com -H my-vm [-a address] [-u ssh_username] [-k ssh_private_key_file]
 ```
 
-The VM is looked up in vCenter using the credentials in `vaults/vsphere.yml`.
+The VM is looked up in vCenter using the credentials in `vaults/vsphere.yml`. The same vault entry can
+also supply the guest SSH login (`ssh_username`, `ssh_password`,
+`ssh_private_key_file`); see [doc/vaults.md](doc/vaults.md#vsphere-vault).
 Windows guests are detected and skipped, as are VMs that are not CentOS or not
 reachable over SSH. `-a` gives an address for VMs whose vCenter name is not in
 DNS. On CentOS, `playbooks/templates/stage-v2v.sh.j2` is installed as
