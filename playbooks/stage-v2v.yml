@@ -1,0 +1,262 @@
+---
+# playbooks/stage-v2v.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Stage the stage-v2v init script on CentOS VMs before virt-v2v migrates them
+# to OpenStack. Windows guests are detected through vCenter and skipped.
+#
+# vCenter credentials come from vaults/vsphere.yml, the same vault and
+# selection scheme as the migrate playbooks:
+#
+#   vsphere_projects:
+#     example:
+#       vcenter_hostname: "vc.example.com"
+#       vcenter_username: "administrator@example.com"
+#       vcenter_password: "my-password"
+#       datacenter: "Datacenter"   # optional, default "Datacenter"
+#       validate_certs: true       # optional, default true
+#       ssh_username: "root"       # optional guest SSH settings, applied as
+#       ssh_password: "my-pass"    # ansible_user / ansible_password /
+#       ssh_private_key_file: "~/.ssh/id_ed25519"  # ansible_ssh_private_key_file
+#
+# The ssh_* keys may also be set flat at the top level of the vault (legacy
+# layout) or with -e, and either overrides the selected entry. Any left unset
+# fall back to the inventory, ssh-agent, or ~/.ssh/config.
+#
+# -e vsphere_target_vcenter=<name> matches a vault key or a vcenter_hostname.
+# With no target, the legacy flat vcenter_hostname/vcenter_username/
+# vcenter_password keys are used if present; otherwise a single-entry
+# vsphere_projects map is auto-selected. Run through bin/ansible-run.sh to
+# supply the vault password.
+
+- name: Stage the v2v init script on migration VMs
+  hosts: migrate
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Include the vSphere vault variables
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../vaults/vsphere.yml"
+      run_once: true
+      no_log: true
+
+    - name: Select the credentials for the requested vCenter
+      ansible.builtin.set_fact:
+        vsphere_selected_entry: "{{ item.value }}"
+        vsphere_target_name: "{{ item.key | string }}"
+      loop: "{{ vsphere_projects | default({}) | dict2items }}"
+      when:
+        - vsphere_target_vcenter | default('') | string | trim | length > 0
+        - vsphere_target_name is not defined
+        - (vsphere_target_vcenter | string | trim) in [item.key | string, item.value.vcenter_hostname | default('') | string]
+      run_once: true
+      no_log: true
+
+    - name: Fail when the requested vCenter matches nothing in the vault
+      ansible.builtin.fail:
+        msg: >-
+          vCenter '{{ vsphere_target_vcenter }}' matches no vault key or
+          vcenter_hostname in vaults/vsphere.yml under vsphere_projects.
+          Available: {{ vsphere_projects | default({}) | list | join(', ') or '<none>' }}.
+      when:
+        - vsphere_target_vcenter | default('') | string | trim | length > 0
+        - vsphere_target_name is not defined
+      run_once: true
+
+    - name: Use the legacy flat credentials when no vCenter was requested
+      ansible.builtin.set_fact:
+        vsphere_target_name: legacy
+      when:
+        - vsphere_target_name is not defined
+        - vcenter_hostname is defined
+        - vcenter_hostname | string | trim | length > 0
+      run_once: true
+
+    - name: Auto-select the only vault vCenter when none was requested
+      ansible.builtin.set_fact:
+        vsphere_selected_entry: "{{ (vsphere_projects | dict2items | first).value }}"
+        vsphere_target_name: "{{ (vsphere_projects | dict2items | first).key | string }}"
+      when:
+        - vsphere_target_name is not defined
+        - vsphere_projects is defined
+        - vsphere_projects | length == 1
+      run_once: true
+      no_log: true
+
+    - name: Fail when no vCenter is selected
+      ansible.builtin.fail:
+        msg: >-
+          No vCenter selected. Pass -e vsphere_target_vcenter=<name> matching
+          a key or vcenter_hostname in vsphere_projects, or define the legacy
+          flat vcenter_hostname/vcenter_username/vcenter_password credentials.
+      when: vsphere_target_name is not defined
+      run_once: true
+
+    - name: Promote the selected map entry to the module credentials
+      ansible.builtin.set_fact:
+        vcenter_hostname: "{{ vsphere_selected_entry.vcenter_hostname | string }}"
+        vcenter_username: "{{ vsphere_selected_entry.vcenter_username | string }}"
+        vcenter_password: "{{ vsphere_selected_entry.vcenter_password | string }}"
+        validate_certs: "{{ vsphere_selected_entry.validate_certs | default(true) | bool }}"
+        datacenter: "{{ vsphere_selected_entry.datacenter | default('Datacenter') | string }}"
+      when: vsphere_selected_entry is defined
+      run_once: true
+      no_log: true
+
+    - name: Apply defaults for the legacy flat credentials
+      ansible.builtin.set_fact:
+        validate_certs: "{{ validate_certs | default(true) | bool }}"
+        datacenter: "{{ datacenter | default('Datacenter') | string }}"
+      when: vsphere_selected_entry is not defined
+      run_once: true
+
+    - name: Assert the vCenter credentials exist
+      ansible.builtin.assert:
+        that:
+          - vcenter_hostname is defined and (vcenter_hostname | string | trim | length) > 0
+          - vcenter_username is defined and (vcenter_username | string | trim | length) > 0
+          - vcenter_password is defined and (vcenter_password | string | trim | length) > 0
+        fail_msg: >-
+          vaults/vsphere.yml must define the legacy flat vcenter_hostname,
+          vcenter_username, and vcenter_password, or a vsphere_projects entry
+          with the same keys.
+      run_once: true
+      no_log: true
+
+    - name: Apply the guest SSH settings from the vault
+      ansible.builtin.set_fact:
+        "{{ item.var }}": "{{ item.value }}"
+      loop:
+        - var: ansible_user
+          value: "{{ ssh_username | default((vsphere_selected_entry | default({})).ssh_username | default('')) | string }}"
+        - var: ansible_password
+          value: "{{ ssh_password | default((vsphere_selected_entry | default({})).ssh_password | default('')) | string }}"
+        - var: ansible_ssh_private_key_file
+          value: "{{ ssh_private_key_file | default((vsphere_selected_entry | default({})).ssh_private_key_file | default('')) | string }}"
+      loop_control:
+        label: "{{ item.var }}"
+      when: item.value | length > 0
+      run_once: true
+      no_log: true
+
+    - name: Query VM guest OS from vCenter
+      community.vmware.vmware_guest_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ validate_certs }}"
+        datacenter: "{{ datacenter }}"
+        name: "{{ inventory_hostname }}"
+      delegate_to: localhost
+      become: false
+      register: vm_guest_info
+      no_log: true
+
+    # The module matches the name across every datacenter. Require the VM the
+    # migration playbooks would pick, which searches /<datacenter>/vm only.
+    - name: Assert the VM is in the configured datacenter
+      ansible.builtin.assert:
+        that:
+          - (vm_guest_info.instance.hw_folder | default('') | string).startswith('/' ~ datacenter ~ '/vm')
+        fail_msg: >-
+          VM '{{ inventory_hostname }}' is in
+          '{{ vm_guest_info.instance.hw_folder | default('unknown') }}', not
+          datacenter '{{ datacenter }}'. Select the vCenter entry whose
+          datacenter holds this VM.
+
+    - name: Determine whether the VM is Windows
+      ansible.builtin.set_fact:
+        vm_is_windows: >-
+          {{
+            [
+              vm_guest_info.instance.hw_guest_full_name | default(''),
+              vm_guest_info.instance.hw_guest_id | default(''),
+              vm_guest_info.instance.hw_name | default('')
+            ] | join(' ') | lower is search('windows')
+          }}
+
+    # An address is explicit when ansible_host differs from the inventory name
+    # (e.g. stage-v2v.sh -a). Decided here, not in the delegated task below,
+    # because ansible_host resolves against localhost there.
+    - name: Record whether an explicit address was given
+      ansible.builtin.set_fact:
+        vm_address_explicit: "{{ ansible_host | default(inventory_hostname) != inventory_hostname }}"
+
+    - name: Check whether the VM name resolves
+      ansible.builtin.command: getent hosts {{ inventory_hostname | quote }}
+      delegate_to: localhost
+      become: false
+      register: vm_name_lookup
+      changed_when: false
+      failed_when: false
+      when:
+        - not vm_is_windows
+        - not vm_address_explicit
+
+    # A VM can be valid in vCenter yet missing from DNS. Without an explicit
+    # address, fall back to the IPv4 address vCenter reports, which needs
+    # VMware Tools running in the guest.
+    - name: Use the vCenter-reported address when the VM name does not resolve
+      ansible.builtin.set_fact:
+        ansible_host: "{{ vm_guest_info.instance.ipv4 }}"
+      when:
+        - not vm_is_windows
+        - not vm_address_explicit
+        - vm_name_lookup is not skipped
+        - vm_name_lookup.rc != 0
+        - vm_guest_info.instance.ipv4 | default('') | string | length > 0
+
+    - name: Skip stage-v2v on Windows VM
+      ansible.builtin.debug:
+        msg: "Skipping stage-v2v for Windows VM '{{ inventory_hostname }}'."
+      when: vm_is_windows
+
+    # The guests are old (CentOS 7 has only Python 2.7 and 3.6, which current
+    # ansible-core cannot run modules on), so everything from here on uses raw
+    # and needs no Python on the VM.
+    - name: Check if host is CentOS
+      ansible.builtin.raw: test -f /etc/centos-release && echo centos || echo other
+      register: centos_release
+      changed_when: false
+      when: not vm_is_windows
+      # A VM can be valid in vCenter yet unresolvable or unreachable over SSH;
+      # that is reported below, not treated as a failure.
+      ignore_unreachable: true
+
+    - name: Report an unreachable VM
+      ansible.builtin.debug:
+        msg: "Skipping stage-v2v for '{{ inventory_hostname }}': not reachable over SSH."
+      when:
+        - not vm_is_windows
+        - centos_release is unreachable
+
+    - name: Report a reachable VM that is not CentOS
+      ansible.builtin.debug:
+        msg: "Skipping stage-v2v for '{{ inventory_hostname }}': not a CentOS guest."
+      when:
+        - not vm_is_windows
+        - centos_release is not unreachable
+        - centos_release.stdout_lines | first | default('') | trim != 'centos'
+
+    - name: Stage stage-v2v service on CentOS only
+      when:
+        - not vm_is_windows
+        - centos_release is not unreachable
+        - centos_release.stdout_lines | first | default('') | trim == 'centos'
+      block:
+        - name: Copy stage-v2v.sh to VM
+          ansible.builtin.raw: >-
+            tmp=$(mktemp) &&
+            echo '{{ lookup('ansible.builtin.template', 'stage-v2v.sh.j2') | b64encode }}' | base64 -d > "$tmp" &&
+            if cmp -s "$tmp" /etc/init.d/stage-v2v.sh ;
+            then rm -f "$tmp" && echo unchanged ;
+            else install -m 0755 "$tmp" /etc/init.d/stage-v2v.sh && rm -f "$tmp" && echo changed ;
+            fi
+          register: stage_v2v_copy
+          changed_when: stage_v2v_copy.stdout_lines | first | default('') | trim == 'changed'
+
+        - name: Register and enable stage-v2v.sh with chkconfig
+          ansible.builtin.raw: chkconfig --add stage-v2v.sh && chkconfig stage-v2v.sh on
+          changed_when: stage_v2v_copy is changed
+

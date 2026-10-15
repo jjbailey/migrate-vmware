@@ -1,0 +1,81 @@
+#!/bin/bash
+# stage-v2v.sh
+# vim: set tabstop=4 shiftwidth=4 expandtab:
+#
+# chkconfig: 345 90 10
+# description: script to stage v2v networking
+
+### BEGIN INIT INFO
+# Provides:          stage-v2v.sh
+# Required-Start:    $network
+# Required-Stop:
+# Default-Start:     3 4 5
+# Default-Stop:      0 1 2 6
+# Short-Description: Start/stop stage-v2v.sh
+### END INIT INFO
+
+# Copy this script to /etc/init.d/stage-v2v.sh in a VMware VM to remove a
+# static IP assignment before v2v migrates the VM to an OpenStack instance.
+# CentOS only.
+#
+# chkconfig --add stage-v2v.sh
+# chkconfig stage-v2v.sh on
+
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin
+
+is_openstack()
+{
+    local platform
+    platform=$(dmidecode -s system-product-name)
+    [[ $platform == "OpenStack Nova" ]]
+}
+
+is_rhel_like()
+{
+    grep -qi 'ID_LIKE=.*rhel' /etc/os-release
+}
+
+disable_udev_rule()
+{
+    ln -sf /dev/null /etc/udev/rules.d/70-persistent-net.rules
+}
+
+configure_network_interface()
+{
+    local nic
+    nic=$(ip route show default | awk '/default/ {print $5}')
+    [[ -z $nic ]] && nic="eth0"
+
+    local ifconfig_path="/etc/sysconfig/network-scripts/ifcfg-$nic"
+    if [[ ! -f $ifconfig_path ]] ; then
+        echo "stage-v2v.sh: $ifconfig_path not found; leaving networking unchanged" >&2
+        return 1
+    fi
+    grep -qi "BOOTPROTO=dhcp" "$ifconfig_path" && return
+    cp -p -b "$ifconfig_path" "$ifconfig_path.orig"
+
+    cat << EOF > "$ifconfig_path"
+BOOTPROTO=dhcp
+DEVICE=$nic
+ONBOOT=yes
+STARTMODE=auto
+TYPE=Ethernet
+USERCTL=no
+EOF
+}
+
+main()
+{
+    if is_openstack && is_rhel_like ; then
+        disable_udev_rule
+        configure_network_interface
+        # Disable first so a failed restart cannot leave this running on every
+        # boot; the network settings are already written by this point.
+        chkconfig stage-v2v.sh off
+        systemctl restart network
+    fi
+}
+
+main

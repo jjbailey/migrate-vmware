@@ -4,8 +4,8 @@
 
 # Wrapper to run ansible-playbook with the vault password wired up.
 #
-# All credentials live in the encrypted files in vaults/ (see README.md
-# "Secrets"), so ansible needs the vault password to load them. This wrapper
+# All credentials live in the encrypted files in vaults/, so ansible needs
+# the vault password to load them. This wrapper
 # appends one of, in order:
 #   1. nothing, if you already passed --ask-vault-pass, --vault-password-file,
 #      or --vault-id
@@ -37,10 +37,10 @@ ARGS=("$@")
 has_vault_option=false
 for arg in "${ARGS[@]}" ; do
     case "$arg" in
-        --ask-vault-pass | --ask-vault-password | -J \
-            | --vault-password-file | --vault-password-file=* \
-            | --vault-pass-file | --vault-pass-file=* \
-            | --vault-id | --vault-id=*)
+        --ask-vault-pass | --ask-vault-password | -J | \
+            --vault-password-file | --vault-password-file=* | \
+            --vault-pass-file | --vault-pass-file=* | \
+            --vault-id | --vault-id=*)
             has_vault_option=true
             break
             ;;

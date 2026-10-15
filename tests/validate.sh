@@ -33,7 +33,7 @@ while IFS= read -r script ; do
     else
         fail "$script failed bash -n"
     fi
-done < <(find -L bin local -type f -name '*.sh' 2> /dev/null)
+done < <(find -L bin local playbooks/templates -type f \( -name '*.sh' -o -name '*.sh.j2' \) 2> /dev/null)
 
 echo "== shellcheck =="
 # SC1007 is the intentional `CDPATH= builtin cd` idiom. local/ holds the
@@ -43,6 +43,11 @@ if command -v shellcheck > /dev/null 2>&1 ; then
         echo "  ok   bin/*.sh"
     else
         fail "shellcheck reported warnings in bin/"
+    fi
+    if shellcheck -S warning playbooks/templates/*.sh.j2 ; then
+        echo "  ok   playbooks/templates/*.sh.j2"
+    else
+        fail "shellcheck reported warnings in playbooks/templates/"
     fi
 else
     echo "  skip shellcheck (not installed)"

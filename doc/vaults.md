@@ -139,6 +139,10 @@ vsphere_projects:
     vcenter_password: "my-admin-password"
     datacenter: "Datacenter"
     validate_certs: true
+    # Optional guest SSH login, used only by bin/stage-v2v.sh
+    ssh_username: "root"
+    ssh_password: "my-guest-password"
+    ssh_private_key_file: "~/.ssh/id_ed25519"
   other-site:
     vcenter_hostname: "other-vcenter"
     vcenter_username: "my-admin-user"
@@ -151,5 +155,7 @@ vsphere_projects:
 ```
 
 Select a vCenter with `-e vsphere_target_vcenter=<key-or-hostname>`. A
-single-entry map is auto-selected. The selected vCenter key is recorded in
+single-entry map is auto-selected. The optional guest-login `ssh_*` keys may also be set flat at
+the top level or with `-e`, which override the selected entry; unset values fall
+back to the inventory, ssh-agent, or `~/.ssh/config`. The selected vCenter key is recorded in
 image-catalog scope so same-named content libraries remain distinct.

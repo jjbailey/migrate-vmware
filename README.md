@@ -82,14 +82,14 @@ the AWS bootstrap is a one-time administrative step.
   to export it as an OVA (`vApp.Export`). Nothing is written to vCenter other
   than the temporary snapshot, which the run removes.
 - **AWS**:
-  - *Bootstrap* (`bootstrap-aws-import.yml`, once): create the S3 staging
+  - _Bootstrap_ (`bootstrap-aws-import.yml`, once): create the S3 staging
     bucket and the `vmimport` IAM role and its inline policy
     (`s3:CreateBucket`, `iam:CreateRole`, `iam:PutRolePolicy`, plus the
     matching `Get`/`List` calls to check for existing resources).
-  - *Migration*: write, read, and delete objects in the staging bucket;
+  - _Migration_: write, read, and delete objects in the staging bucket;
     `ec2:ImportImage`, `ec2:DescribeImportImageTasks`, and tagging the
     resulting image and snapshot.
-  - *Launch*: `ec2:RunInstances` and tagging, and read access to the images,
+  - _Launch_: `ec2:RunInstances` and tagging, and read access to the images,
     subnets, and security groups you name.
 - **GCP** (`service_account_key`): in the project selected by `gcp_project`,
   upload, list, and delete objects in `gcs_bucket`; create, read, and delete
@@ -141,27 +141,32 @@ flow is illustrated in [doc/workflow.md](doc/workflow.md).
 3. **`playbooks/launch-aws-instance.yml`** - launches an EC2 instance from an
    AWS migration catalog entry.
 
-4. **`playbooks/migrate-openstack-vm.yml`** - exports a VMware VM as an OVF package, then converts and uploads one VMDK at a time as a separate Glance image.
+4. **`playbooks/stage-v2v.yml`** (optional, via `bin/stage-v2v.sh`) - run
+   before `migrate-openstack-vm.yml` on CentOS 7 guests with static IP
+   addresses, so they come up on DHCP in OpenStack (see "Staging CentOS 7
+   Guests for OpenStack" below).
+
+5. **`playbooks/migrate-openstack-vm.yml`** - exports a VMware VM as an OVF package, then converts and uploads one VMDK at a time as a separate Glance image.
    The first disk is the boot-disk candidate; the remaining images are data
    disks.
 
-5. **`playbooks/launch-openstack-instance.yml`** - creates an OpenStack server
+6. **`playbooks/launch-openstack-instance.yml`** - creates an OpenStack server
    from the latest completed OpenStack migration, using the first image as the
    boot disk and creating/attaching Cinder volumes for the remaining disks.
    Optional Neutron port pre-creation can preserve source MAC addresses and/or
    request fixed IPs (see "OpenStack Launch Networking" below).
 
-6. **`playbooks/migrate-gcp-vm.yml`** - exports a VMware VM as an OVF package,
+7. **`playbooks/migrate-gcp-vm.yml`** - exports a VMware VM as an OVF package,
    uploads each referenced VMDK to Cloud Storage, and imports each disk into Compute Engine
    through Migrate to Virtual Machines (`gcloud compute migration image-imports`).
    The first disk receives guest OS adaptation; data disks use the same image
    import API with adaptation skipped.
 
-7. **`playbooks/launch-gcp-instance.yml`** - launches a Compute Engine instance
+8. **`playbooks/launch-gcp-instance.yml`** - launches a Compute Engine instance
    from the latest completed GCP migration and creates/attaches persistent
    disks for the migrated data images.
 
-8. **`bin/reconcile-catalog-openstack.py`** - removes completed OpenStack
+9. **`bin/reconcile-catalog-openstack.py`** - removes completed OpenStack
    migration entries whose Glance images are gone, and active OpenStack
    deployment entries whose servers or data volumes are gone. When a server is
    missing but its pre-created network-identity ports remain, the dry-run output
@@ -169,13 +174,13 @@ flow is illustrated in [doc/workflow.md](doc/workflow.md).
    `--dry-run`, `--project-id`, region selection, and the same `--force` safety
    guard (one project per run).
 
-9. **`bin/reconcile-catalog-gcp.py`** - removes completed GCP migration entries
-   whose Compute Engine images are gone, and active GCP deployment entries
-   whose instances or data disks are gone. It supports `--dry-run`,
-   `--project-id`, and refuses unusually large removals unless `--force` is
-   supplied.
+10. **`bin/reconcile-catalog-gcp.py`** - removes completed GCP migration entries
+    whose Compute Engine images are gone, and active GCP deployment entries
+    whose instances or data disks are gone. It supports `--dry-run`,
+    `--project-id`, and refuses unusually large removals unless `--force` is
+    supplied.
 
-10. **`bin/reconcile-catalog-aws.py`** - removes completed AWS migration entries
+11. **`bin/reconcile-catalog-aws.py`** - removes completed AWS migration entries
     whose AMIs are gone, and active AWS deployment entries whose EC2 instances
     are gone or terminated. It supports `--dry-run`, region/profile selection,
     `--project-id`/`--account-id`, account verification, and the same `--force`
@@ -188,16 +193,50 @@ preflight, import, catalog fields, and artifact cleanup live under sibling
 `aws/`, `openstack/`, and `gcp/` directories, each of which reuses the common
 pipeline. Shared defaults are kept in `playbooks/vars/migration-common.yml`.
 
-## Repository Map
+## Documentation
 
-- `bin/` contains the playbook runner, six environment-aware launch/migrate wrappers,
-  the interactive launch dialogs (AWS, GCP, OpenStack), vault helpers, catalog
-  lookup/append tools, and catalog reconciliation scripts. The platform wrappers
-  also accept normal Ansible arguments such as `-e` and append `-v`.
-- `playbooks/` contains the seven entry playbooks, shared variables, and target
-  task pipelines under `playbooks/tasks/migration/`.
-- `examples/` contains the OpenStack launch matrix and sample cloud-init data.
-- `tests/` contains the static validation gate and catalog tests.
+- [doc/vaults.md](doc/vaults.md) - vault file layouts in one place
+- [doc/workflow.md](doc/workflow.md) - illustrated migration workflow
+  ([SVG](doc/workflow.svg))
+- [migrate-vmware presentation](doc/migrate_vmware_presentation.pptx) - project presentation slides
+- [migrate-vmware presentation video](doc/migrate_vmware_presentation.mp4) - recorded video of the project presentation
+
+## Project Structure
+
+```bash
+migrate-vmware/
+├── ansible.cfg                  # Ansible configuration
+├── bin/                         # Utility scripts
+│   ├── run-playbook.sh          # Playbook runner (cd's to the repo, calls ansible-run.sh)
+│   ├── ansible-run.sh           # ansible-playbook wrapper that supplies the vault password
+│   ├── migrate-{aws,gcp,openstack}-vm.sh  # Environment-aware migration wrappers
+│   ├── migrate-*-dialog.sh      # Interactive front ends for the migration wrappers
+│   ├── launch-{aws,gcp,openstack}-instance.sh  # Environment-aware launch wrappers
+│   ├── launch-*-dialog.sh       # Interactive front ends for the launch wrappers
+│   ├── stage-v2v.sh             # Stages a CentOS 7 VM for DHCP before migration
+│   ├── lookup-migration-*.py    # Migration catalog lookups
+│   ├── append-*-catalog.py      # Migration and deployment catalog appenders
+│   ├── reconcile-catalog-*.py   # Removes catalog entries gone from AWS, GCP, or OpenStack
+│   ├── inspect-ova.py           # OVA inspection
+│   └── *-vault.sh               # Vault management scripts
+├── catalogs/                    # Migration and deployment catalogs
+├── doc/                         # Documentation, workflow diagram, presentation
+├── examples/                    # OpenStack launch matrix and sample cloud-init data
+├── playbooks/                   # Ansible playbooks
+│   ├── migrate-{aws,gcp,openstack}-vm.yml
+│   ├── launch-{aws,gcp,openstack}-instance.yml
+│   ├── bootstrap-aws-import.yml
+│   ├── stage-v2v.yml            # Installs the one-time DHCP reconfigure script
+│   ├── tasks/migration/         # Per-target task pipelines (aws, gcp, openstack, common)
+│   ├── templates/               # Files installed on guests
+│   └── vars/                    # Shared variables
+├── requirements.yml             # Pinned Ansible collections
+├── tests/                       # Static validation gate and catalog tests
+└── vaults/                      # Encrypted credentials
+```
+
+The platform wrappers also accept normal Ansible arguments such as `-e` and
+append `-v`.
 
 ### OpenStack Launch Networking
 
@@ -600,6 +639,25 @@ artifacts belong on another filesystem. The shared widgets and the
 terminal handling live in `bin/launch-dialog-common.sh`, which every dialog
 sources. Ready-to-run examples are collected in
 [examples/README.md](examples/README.md).
+
+## Staging CentOS 7 Guests for OpenStack
+
+When CentOS 7 servers with static IP addresses migrate to OpenStack, they may
+need staging to reconfigure themselves for DHCP before the migration begins. The
+stage-v2v playbook installs a one-time, boot-time reconfigure script to do this.
+
+```bash
+bin/stage-v2v.sh -c vcenter.example.com -H my-vm [-a address] [-u ssh_username] [-k ssh_private_key_file]
+```
+
+The VM is looked up in vCenter using the credentials in `vaults/vsphere.yml`. The same vault entry can
+also supply the guest SSH login (`ssh_username`, `ssh_password`,
+`ssh_private_key_file`); see [doc/vaults.md](doc/vaults.md#vsphere-vault).
+Windows guests are detected and skipped, as are VMs that are not CentOS or not
+reachable over SSH. `-a` gives an address for VMs whose vCenter name is not in
+DNS. On CentOS, `playbooks/templates/stage-v2v.sh.j2` is installed as
+`/etc/init.d/stage-v2v.sh` and enabled with `chkconfig`. On first boot on
+OpenStack it switches the NIC to DHCP, restarts networking, and disables itself.
 
 ## Development and Validation
 
