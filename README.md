@@ -34,7 +34,8 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   staging S3 bucket, and run `ec2:ImportImage`. OpenStack migrations require
   image, volume, network, and server permissions. Before the first GCP image
   import, enable the required Google Cloud APIs in the project selected by
-  `gcp_project` and grant the permissions described under "Secrets." Follow
+  `gcp_project` and grant the permissions described under
+  [Required Privileges](#required-privileges). Follow
   [Google’s M2VM service setup guide](https://docs.cloud.google.com/migrate/virtual-machines/docs/5.0/get-started/enable-services)
   for the VM Migration and supporting APIs; this workflow also uses Cloud Storage
   for staging and Cloud Build during image import. Cloud Build may be enabled
@@ -63,6 +64,17 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   `openstacksdk`, `google-auth`, `requests`, and `PyYAML`.
   `govc` should be installed as `/usr/local/bin/govc` or otherwise available
   on `PATH`.
+- For the datastore-direct OpenStack migration
+  ([doc/datastore-direct.md](doc/datastore-direct.md)): `nbdkit`, whose `curl`
+  plugin is the fallback backend. **Install the `vddk` backend too**: nbdkit's
+  `vddk` plugin and a VixDiskLib. It is several times faster (it skips a thin
+  disk's unallocated space, where curl reads every byte of the flat file), and
+  it is the only backend that can read a powered-on VM on VMFS. Some nbdkit
+  packages, Ubuntu's among them, do not include the `vddk` plugin; the doc shows
+  how to build it. It is tested with `libvixDiskLib.so.8.0.3` from
+  [OpenVDDK](https://openvddk.com/), an independent, read-only replacement for
+  VMware's disk library from the creator of V2K Migrate (see its site for
+  availability); VMware's own VDDK works too where you are licensed for it.
 - `dialog` or `whiptail` is required only for the interactive dialogs
   (`bin/*-dialog.sh`; see [Interactive Dialogs](#interactive-dialogs)) and
   should be available on `PATH`.
@@ -119,6 +131,8 @@ ansible --version
 govc version
 ovftool --version
 qemu-img --version   # OpenStack migrations
+nbdkit --version     # datastore-direct OpenStack migrations
+nbdkit vddk --dump-plugin | grep vddk_library_version   # its faster VixDiskLib backend (recommended)
 gcloud --version     # GCP migrations
 aws --version        # AWS migrations
 command -v dialog || command -v whiptail   # interactive dialogs only
@@ -146,9 +160,14 @@ flow is illustrated in [doc/workflow.md](doc/workflow.md).
    addresses, so they come up on DHCP in OpenStack (see "Staging CentOS 7
    Guests for OpenStack" below).
 
-5. **`playbooks/migrate-openstack-vm.yml`** - exports a VMware VM as an OVF package, then converts and uploads one VMDK at a time as a separate Glance image.
-   The first disk is the boot-disk candidate; the remaining images are data
-   disks.
+5. **`playbooks/migrate-openstack-vm.yml`** - exports a VMware VM as an OVF
+   package, then converts each VMDK to QCOW2 and uploads it as a separate
+   Glance image; the next disk converts while the current one uploads. The
+   first disk is the boot-disk candidate; the remaining images are data
+   disks. An alternative that needs no clone and no OVF export is
+   **`playbooks/migrate-openstack-vm-vddk.yml`**, which snapshots the running VM
+   and streams its disks straight from the datastore (see "Datastore-Direct
+   Migration to OpenStack" below).
 
 6. **`playbooks/launch-openstack-instance.yml`** - creates an OpenStack server
    from the latest completed OpenStack migration, using the first image as the
@@ -198,6 +217,8 @@ pipeline. Shared defaults are kept in `playbooks/vars/migration-common.yml`.
 - [doc/vaults.md](doc/vaults.md) - vault file layouts in one place
 - [doc/workflow.md](doc/workflow.md) - illustrated migration workflow
   ([SVG](doc/workflow.svg))
+- [doc/datastore-direct.md](doc/datastore-direct.md) - the datastore-direct OpenStack
+  migration: how it works, requirements, limits
 - [migrate-vmware presentation](doc/migrate_vmware_presentation.pptx) - project presentation slides
 - [migrate-vmware presentation video](doc/migrate_vmware_presentation.mp4) - recorded video of the project presentation
 
@@ -213,10 +234,15 @@ migrate-vmware/
 │   ├── migrate-*-dialog.sh      # Interactive front ends for the migration wrappers
 │   ├── launch-{aws,gcp,openstack}-instance.sh  # Environment-aware launch wrappers
 │   ├── launch-*-dialog.sh       # Interactive front ends for the launch wrappers
+│   ├── migrate-openstack-vm-vddk.sh      # Datastore-direct OpenStack migration wrapper
+│   ├── migrate-openstack-vddk-dialog.sh  # Interactive front end for it
 │   ├── stage-v2v.sh             # Stages a CentOS 7 VM for DHCP before migration
+│   ├── inspect-vm.py            # Disk manifest from a source VM (datastore-direct)
+│   ├── enable-cbt.py            # Enables Changed Block Tracking without a power cycle
 │   ├── lookup-migration-*.py    # Migration catalog lookups
 │   ├── append-*-catalog.py      # Migration and deployment catalog appenders
 │   ├── reconcile-catalog-*.py   # Removes catalog entries gone from AWS, GCP, or OpenStack
+│   ├── openstack-project-facts.py  # Images, security groups, networks, keys, quotas for one project
 │   ├── inspect-ova.py           # OVA inspection
 │   └── *-vault.sh               # Vault management scripts
 ├── catalogs/                    # Migration and deployment catalogs
@@ -224,6 +250,7 @@ migrate-vmware/
 ├── examples/                    # OpenStack launch matrix and sample cloud-init data
 ├── playbooks/                   # Ansible playbooks
 │   ├── migrate-{aws,gcp,openstack}-vm.yml
+│   ├── migrate-openstack-vm-vddk.yml   # Datastore-direct: no clone, no OVF
 │   ├── launch-{aws,gcp,openstack}-instance.yml
 │   ├── bootstrap-aws-import.yml
 │   ├── stage-v2v.yml            # Installs the one-time DHCP reconfigure script
@@ -256,7 +283,38 @@ results, the launch fails with candidate IDs. For deterministic launches,
 provide `openstack_network_id` and
 `openstack_security_group_ids` directly. The wrapper exposes these as
 `OS_NETWORK_ID` and
-`OS_SECURITY_GROUP_IDS_JSON`.
+`OS_SECURITY_GROUP_IDS_JSON`. `openstack_network_id` alone is enough; the
+`Ext-Net` default for `openstack_network` is then not looked up. For several
+NICs, `openstack_nics` (wrapper: `OS_NICS_JSON`) takes precedence over both
+single-network settings, which are ignored with a note, so they need not be
+cleared.
+
+The launch refuses an `instance_name` (default: the VM name) that an existing
+server in the project already uses, before creating anything. If a later step
+fails, it deletes what that attempt created: the server first, then the
+pre-created ports and the data volumes.
+
+To see which names and IDs a project can use, run
+`./bin/openstack-project-facts.py <project>`. It lists the images, security
+groups, networks, and keypairs that project can use, filtered to the
+authenticated project even when the account is an admin. `<project>` is a
+vault key, `project_name`, or `project_id` from `vaults/openstack.yml`. You
+can leave it out when the vault has one project or `OS_*` credentials are
+already set; `--cloud <name>` uses a `clouds.yaml` entry instead (that entry
+picks the project, so a `<project>` given with it is ignored with a warning),
+and `--json` prints machine-readable output. External networks are listed
+only when open to the project: where the `access_as_external` RBAC policies
+are visible, one with policies must have one for this project or `*`.
+Keypairs belong to the OpenStack user, not the project, so the keypair list is
+the authenticated user's.
+
+The same script ends with the project's quotas as `used/total` for compute
+(instances, cores, RAM, server groups), volumes (count, GB, snapshots,
+backups, and any per-volume-type limit), and network (floating IPs, networks,
+subnets, ports, routers, security groups and rules). A quota is flagged `LOW`
+at 80% used (`--warn-percent N` changes that), `FULL` at its limit, and
+`none allowed` when the limit is 0. After a deployment, run
+`./bin/openstack-project-facts.py <project> --quotas` to see only the quotas.
 
 For interactive access to a launched OpenStack VM, provide an OpenStack
 keypair and a security group that permits TCP/22. `openstack_auto_ip`
@@ -269,7 +327,10 @@ the wrapper defaults it to `true`, and exposes the setting as
 keypair injection to add the public key; otherwise use credentials already
 present in the source VM. The launch wrapper reads `OS_FLAVOR`,
 `OS_KEY_NAME`, `OS_SECURITY_GROUPS_JSON`, and
-the explicit ID variables above.
+the explicit ID variables above. `OS_KEY_NAME` defaults to a keypair named
+`cloud`, which must already exist in the target project; set it to the
+keypair you use. The playbook's `openstack_key_name` has no default and
+launches without a keypair when it is empty.
 
 For a guided launch, run `./bin/launch-openstack-dialog.sh`. It collects
 the same common wrapper settings, shows the generated shell command, and can
@@ -378,6 +439,11 @@ network interface (enabled by default in the playbook); GCP uses its selected
 VPC network and subnet, with SSH access supplied by OS Login or project/
 instance metadata.
 
+`bin/launch-aws-instance.sh` passes `AWS_KEY_NAME` as the EC2 key pair, and it
+defaults to a key pair named `cloud`, which must already exist in the region;
+set it to the key pair you use. The playbook's `key_name` has no default and
+launches without a key pair when it is empty.
+
 GCP has no named keypair resource equivalent to AWS or OpenStack. The
 equivalent of a pre-registered keypair is a `cloudinit:`-prefixed entry in the
 project's `ssh-keys` metadata, which every instance in the project inherits, so
@@ -388,14 +454,17 @@ Note that `gcloud compute ssh` and the Cloud Console ephemeral-key flow rely on
 not install. On migrated instances, use ordinary `ssh` with an inherited key.
 
 AWS, OpenStack, and GCP migrations use persistent run directories under
-`/var/tmp/migrate-vmware/`, each in a target/VM/run-ID subtree. After an
+`/var/tmp/migrate-vmware/` (the `artifact_root` default, and the wrappers'
+`ARTIFACT_ROOT` default), each in a target/VM/run-ID subtree. After an
 OpenStack or GCP run fails, the OVF package, manifest, and referenced VMDKs are
 retained for resume. AWS retains its OVA in S3 according to its existing flow.
 
 For large OpenStack migrations, the persistent run directory must have enough
-space for the exported OVF disk set plus the temporary QCOW2 for the disk currently
-being processed. No extracted VMDK copy is created. Set `artifact_root` to
-place the normal run hierarchy on another filesystem, or override one run's complete directory with `migration_run_dir`:
+space for the exported OVF disk set plus two temporary QCOW2 files: the disk
+being uploaded and the next disk being converted alongside it. No extracted
+VMDK copy is created. Set `artifact_root` (wrapper: `ARTIFACT_ROOT`) to place
+the normal run hierarchy on another filesystem, or override one run's complete
+directory with `migration_run_dir`:
 
 ```bash
 ./bin/run-playbook.sh playbooks/migrate-openstack-vm.yml \
@@ -422,6 +491,9 @@ it later with:
 
 AWS does not resume with `resume_run_id`; a failed AWS import task is
 cancelled while its staged OVA remains in S3 by default for a follow-up import.
+If the import finished but a later step failed (the snapshot check, tagging,
+or the catalog append), the run deregisters the imported AMI and deletes its
+snapshots, since no catalog row will ever point at them.
 The local AWS OVA is written under
 `/var/tmp/migrate-vmware/aws/<vm-name>/<run-id>` by default; set
 `migration_run_dir` to place this potentially large file elsewhere, for example:
@@ -433,10 +505,22 @@ The local AWS OVA is written under
 ```
 
 Use `-e discard_failed_artifacts=true` only when the retained artifacts should
-be deleted instead of being available for resume. Import polling defaults to
-one hour and can be extended with `openstack_import_poll_retries` and
-`openstack_import_poll_delay` (OpenStack) or `gcp_import_poll_retries` and
-`gcp_import_poll_delay` (GCP) for very large images.
+be deleted instead of being available for resume. On a resumed OpenStack run
+the discard also removes the Glance images earlier attempts of the same run
+uploaded, found by the run's image-name prefix. Import polling defaults to
+four hours for AWS (`import_poll_retries` 480 x `import_poll_delay` 30s) and
+GCP (`gcp_import_poll_retries` 960 x `gcp_import_poll_delay` 15s) and one hour
+for OpenStack (`openstack_import_poll_retries` 240 x
+`openstack_import_poll_delay` 15s); raise them for very large images.
+
+GCP imports run concurrently, so when one disk fails the others may still be
+importing. Without a discard they are left to finish, and a resume reuses
+their images. With `discard_failed_artifacts=true` the run cancels them (a
+best-effort call to the Migrate to Virtual Machines API), waits up to
+`gcp_cancel_poll_retries` (default 120) x `gcp_import_poll_delay` for them to
+stop, removes the import resources, and then deletes the images this attempt
+created along with any it reused from an earlier attempt. An import that
+never stops is reported so its image can be removed by hand.
 
 Multi-disk VMs overlap their slow steps rather than running them end to end.
 GCP starts every M2VM image import before waiting on any of them, so total
@@ -446,6 +530,9 @@ extra staged qcow2 in `migration_run_dir/disks` and hides the shorter of the two
 steps on every disk after the first; `openstack_convert_args` (default
 `['-m', '16', '-W']`) tunes the qemu-img coroutine count, and
 `openstack_convert_async_timeout` bounds one conversion.
+`openstack_convert_args` may also be a string, so a bare
+`-e openstack_convert_args='-m 8 -W'` works: a string that starts with `[` is
+read as a YAML list, anything else is split on whitespace.
 
 GCP imports the boot disk through M2VM, so the guest OS must be on Google's
 [Migrate to Virtual Machines supported-OS list](https://docs.cloud.google.com/migrate/virtual-machines/docs/5.0/discover/supported-os-versions)
@@ -552,10 +639,9 @@ prefix and defaults to `cloudinit`.
 
 Keys are applied by cloud-init's `cc_ssh` module, whose frequency is
 `PER_INSTANCE`. Changing project or instance metadata therefore has no effect
-on an already-launched instance, and neither does a reboot or `instances reset`
-
-- the instance ID is unchanged, so the module does not re-run. To change an
-  instance's keys, delete and relaunch it.
+on an already-launched instance, and neither does a reboot or `instances reset`:
+the instance ID is unchanged, so the module does not re-run. To change an
+instance's keys, delete and relaunch it.
 
 Credentials (vCenter host/user/password, OpenStack authentication, AWS
 region/bucket/role and access keys, and GCP project/service-account settings)
@@ -573,11 +659,11 @@ an interactive prompt:
   -e vm_name=my-vm -e datacenter=Datacenter
 ```
 
-The six `bin/` platform wrappers combine their environment-variable settings with
+The seven `bin/` platform wrappers combine their environment-variable settings with
 any Ansible arguments supplied on the command line; for example,
 `./bin/migrate-openstack-vm.sh -e vm_name=my-vm -e openstack_target_project=my-project`.
-Migration wrappers default their artifact root to `/work/migrate-vmware` and
-accept `ARTIFACT_ROOT` to override it. The wrappers are useful when you want the
+Migration wrappers default their artifact root to `/var/tmp/migrate-vmware`,
+the same as the playbooks, and accept `ARTIFACT_ROOT` to override it. The wrappers are useful when you want the
 playbook runner, vault handling, and verbosity applied consistently.
 
 The interactive `bin/*-dialog.sh` front ends build these wrapper commands for
@@ -587,19 +673,20 @@ migrate, and reconcile) are collected in
 
 ## Interactive Dialogs
 
-Six `bin/` scripts are guided front ends for the platform wrappers. They ask
+Seven `bin/` scripts are guided front ends for the platform wrappers. They ask
 for the settings the wrappers otherwise read from environment variables,
 generate the equivalent wrapper command, and let you review, save, or run it.
 Nothing runs until you confirm at the end.
 
-| Dialog                            | Generates a call to                |
-| --------------------------------- | ---------------------------------- |
-| `bin/migrate-aws-dialog.sh`       | `bin/migrate-aws-vm.sh`            |
-| `bin/migrate-gcp-dialog.sh`       | `bin/migrate-gcp-vm.sh`            |
-| `bin/migrate-openstack-dialog.sh` | `bin/migrate-openstack-vm.sh`      |
-| `bin/launch-aws-dialog.sh`        | `bin/launch-aws-instance.sh`       |
-| `bin/launch-gcp-dialog.sh`        | `bin/launch-gcp-instance.sh`       |
-| `bin/launch-openstack-dialog.sh`  | `bin/launch-openstack-instance.sh` |
+| Dialog                                 | Generates a call to                |
+| -------------------------------------- | ---------------------------------- |
+| `bin/migrate-aws-dialog.sh`            | `bin/migrate-aws-vm.sh`            |
+| `bin/migrate-gcp-dialog.sh`            | `bin/migrate-gcp-vm.sh`            |
+| `bin/migrate-openstack-dialog.sh`      | `bin/migrate-openstack-vm.sh`      |
+| `bin/migrate-openstack-vddk-dialog.sh` | `bin/migrate-openstack-vm-vddk.sh` |
+| `bin/launch-aws-dialog.sh`             | `bin/launch-aws-instance.sh`       |
+| `bin/launch-gcp-dialog.sh`             | `bin/launch-gcp-instance.sh`       |
+| `bin/launch-openstack-dialog.sh`       | `bin/launch-openstack-instance.sh` |
 
 Requirements: `dialog` (preferred) or `whiptail`, and an interactive terminal
 of at least 20x10 (run the script directly, not through a pipe or redirect).
@@ -611,7 +698,10 @@ What each kind asks:
   for the source VM name, an optional certificate-validation override
   (`VALIDATE_CERTS`), and whether to quiesce the snapshot
   (`QUIESCE_SNAPSHOT`). Without a selected vCenter they also ask for the legacy
-  `VCENTER_DATACENTER` override.
+  `VCENTER_DATACENTER` override. The datastore-direct dialog
+  (`migrate-openstack-vddk-dialog.sh`) also asks whether to compress the QCOW2
+  images (`COMPRESS`, default no; yes if `COMPRESS=true` is already set) and
+  leaves `BACKEND` at auto; add `BACKEND` to a saved script to change it.
 - **Launch dialogs** pick the target project the same way and offer the
   migrated VM from `catalogs/migration-catalog.json` (newest completed
   migration for that platform first; a name can also be typed). They then ask
@@ -634,11 +724,37 @@ unsaved command is left in `/tmp`. Cancelling at any prompt, or pressing Esc,
 exits with "Nothing was run."
 
 The migrate dialogs write `ARTIFACT_ROOT` into the script, defaulting to
-`/work/migrate-vmware`; set `ARTIFACT_ROOT` before starting a dialog when the
+`/var/tmp/migrate-vmware`; set `ARTIFACT_ROOT` before starting a dialog when the
 artifacts belong on another filesystem. The shared widgets and the
 terminal handling live in `bin/launch-dialog-common.sh`, which every dialog
 sources. Ready-to-run examples are collected in
 [examples/README.md](examples/README.md).
+
+## Datastore-Direct Migration to OpenStack
+
+`playbooks/migrate-openstack-vm-vddk.yml` migrates a running VM to OpenStack
+without cloning it and without an OVF export: it takes a quiesced snapshot, then
+streams each frozen disk from the datastore, converts it to QCOW2, and uploads it
+to Glance. It writes the same catalog entries as the OVF method. Disks are read
+through VixDiskLib (nbdkit's `vddk` plugin) when it is installed, and otherwise
+from vCenter's `/folder` endpoint (nbdkit's `curl` plugin). Install the `vddk`
+backend: curl is about four times slower (it reads every byte of each flat disk
+file, empty space included, which matters most for large thin disks), needs
+flat disks with no existing snapshots, and cannot read a powered-on VM on VMFS,
+whose disks ESXi locks. On a slow upload
+link, `COMPRESS=true` compresses the QCOW2 images as they are written, which
+cut the upload by more than half in testing.
+
+```bash
+VM_NAME=my-vm VSPHERE_TARGET_VCENTER=my-vcenter ./bin/migrate-openstack-vm-vddk.sh
+COMPRESS=true VM_NAME=my-vm ./bin/migrate-openstack-vm-vddk.sh      # slow upload link
+BACKEND=curl VM_NAME=my-vm ./bin/migrate-openstack-vm-vddk.sh       # force the fallback
+```
+
+It refuses independent, shared, raw-mapped, and encrypted disks before creating
+a snapshot. Changed Block Tracking is not required. See
+[doc/datastore-direct.md](doc/datastore-direct.md) for how it works, installing
+the `vddk` backend, the limits, and what was tested.
 
 ## Staging CentOS 7 Guests for OpenStack
 
@@ -658,6 +774,9 @@ reachable over SSH. `-a` gives an address for VMs whose vCenter name is not in
 DNS. On CentOS, `playbooks/templates/stage-v2v.sh.j2` is installed as
 `/etc/init.d/stage-v2v.sh` and enabled with `chkconfig`. On first boot on
 OpenStack it switches the NIC to DHCP, restarts networking, and disables itself.
+If the NIC's ifcfg file is missing or cannot be rewritten, it still disables
+itself, leaves networking alone, and exits non-zero, so it never retries on
+every boot.
 
 ## Development and Validation
 
@@ -667,12 +786,13 @@ Run the repository gate with:
 tests/validate.sh
 ```
 
-It checks playbook and shell syntax, shellcheck warnings in `bin/`, file
-references in the Markdown docs, vault headers, Python compilation, YAML,
-catalog structure, and the pinned Ansible collection versions. It is a
-static/structure gate rather than a cloud integration test. Focused unit tests
-exercise catalog helper behavior, but no vSphere or cloud operations are
-performed. Run it before submitting changes.
+It checks playbook and shell syntax, shellcheck warnings in `bin/` and in the
+shell templates under `playbooks/templates/`, file references in the Markdown
+docs, vault headers, Python compilation, YAML, catalog structure, and the pinned
+Ansible collection versions. It is a static/structure gate rather than a cloud
+integration test. Focused unit tests exercise catalog helper behavior and the
+datastore-direct disk manifest (`bin/inspect-vm.py`), but no vSphere or cloud
+operations are performed. Run it before submitting changes.
 
 Common failures:
 
@@ -693,6 +813,24 @@ Common failures:
   boot disk, and imported image names must end `-disk-<index>` in that order.
 - AWS refuses to upload because the boot disk is not first in the OVF: see
   `aws_allow_boot_order_mismatch` above.
+- Datastore-direct: "nbdkit's vddk plugin is not installed" or "found no
+  VixDiskLib" (with `BACKEND=vddk`, or in `auto`'s fall-back-to-curl message):
+  build the plugin or link the library as
+  [doc/datastore-direct.md](doc/datastore-direct.md) describes, or use
+  `BACKEND=curl`.
+- Datastore-direct: "vCenter would not serve ... (HTTP 500)" with the curl
+  backend: the VM is powered on and its disks are on VMFS, which ESXi locks.
+  Power it off, or install the `vddk` backend.
+- Datastore-direct: "already has snapshots ... the curl backend cannot read
+  them": delete or consolidate the VM's snapshots, or use the `vddk` backend.
+- Datastore-direct: a failed run keeps its migration snapshot on the source VM
+  as the resume checkpoint. Resume with the printed `resume_run_id`, or discard
+  the run (snapshot, run directory, uploaded images) with
+  `-e discard_run_id=<id>` (wrapper: `DISCARD_RUN_ID`); a retained snapshot keeps
+  growing.
+- Datastore-direct with `validate_certs: true`: "Could not verify the
+  certificate": install the vCenter's CA on the control host, or pass its SHA-1
+  thumbprint with `-e openstack_vddk_thumbprint=<thumbprint>`.
 
 ## Secrets
 
@@ -875,7 +1013,7 @@ See [doc/vaults.md](doc/vaults.md) for the vault file layouts in one place.
   `gcp_import_location` is the region the Migrate to Virtual Machines _import
   job_ runs in - the value passed to `gcloud compute migration image-imports
 --location`. It does **not** control where `gcs_bucket` lives (fixed when
-  the bucket is created; the import reads the staged QCOW2 across regions) or
+  the bucket is created; the import reads the staged VMDK across regions) or
   where the finished image lives (a GCE Compute image is a _global_ resource).
   It only picks which region does the conversion, so it can be changed freely,
   including to route around a regional outage:
@@ -946,8 +1084,10 @@ scrolling back through playbook output to find an AMI ID.
 entry for the given `vm_name`; pass `--project <account-id-or-key>` when
 selecting among multiple AWS accounts and `--region <region>` to restrict the
 match to one region (the launch playbook passes its `aws_region`, since an AMI
-cannot be launched in another region). Legacy rows without account metadata
-remain usable in the authenticated account. OpenStack entries contain an ordered list of
+cannot be launched in another region). With `--project`, rows recorded for
+that account win; legacy rows without `aws_account_id` are used only when no
+row for the account matches, since they could come from any account.
+OpenStack entries contain an ordered list of
 Glance image IDs, one per source disk, for use by the OpenStack launch
 workflow; `bin/lookup-migration-openstack.py --project <name-or-id> --region <region>` picks the
 newest `completed` migration for one `vm_name` in one project and region, and the launch
@@ -986,8 +1126,10 @@ credentials themselves carry a different project, as a service account key does.
 Reconcile OpenStack migration images and deployments against the live cloud
 when resources may have been removed outside this repository. The script uses
 resource UUIDs from both catalogs and removes the exact entries whose resources
-are missing. A shared clone name or server ID does not remove any other row. It never deletes cloud resources; Git history preserves
-the previous catalog state. It also removes OpenStack entries already marked
+are missing. A shared clone name or server ID does not remove any other row.
+It never deletes cloud resources, but removed rows are not kept anywhere: if
+your catalogs are committed to Git, its history holds the previous state;
+otherwise copy the catalog files first. It also removes OpenStack entries already marked
 `retired` by an older reconciliation run. Use `--dry-run` first:
 
 ```bash
@@ -1003,7 +1145,12 @@ the previous catalog state. It also removes OpenStack entries already marked
 
 Only entries for the selected region are checked, because Glance, Nova, and
 Cinder IDs are per region. Older rows with no recorded `openstack_region`
-stay in scope, and the `--force` threshold counts only the scoped rows.
+could belong to any region, where their resources would look missing from
+here, so they are skipped: each is reported on a "skipping ... no
+openstack_region recorded" line and is neither checked nor removed. Such a
+row already marked `retired` is still removed, because that goes by status
+rather than by a resource lookup. The `--force` threshold counts only the
+rows that are checked.
 
 One run reconciles one project: `--project-id` accepts a project name or ID
 and is required whenever the

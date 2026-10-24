@@ -66,7 +66,7 @@ passed to `gcloud compute migration image-imports --location`. It is easy to
 misread this as a storage setting, so, concretely, it does **not** control:
 
 - **Where `gcs_bucket` lives.** A bucket's location is fixed when the bucket
-  is created and is not settable from here. The import reads the staged QCOW2
+  is created and is not settable from here. The import reads the staged VMDK
   across regions perfectly well when the two differ.
 - **Where the finished image lives.** A GCE Compute image is a _global_
   resource, so the imported image is equally usable from every region no
@@ -127,6 +127,11 @@ reading `vaults/openstack.yml` directly. See
 [OpenStack Catalog Reconciliation](../README.md#openstack-catalog-reconciliation)
 for the required `OS_*` variables and the `--cloud`/`OS_CLOUD` alternatives.
 
+`bin/openstack-project-facts.py` does read `vaults/openstack.yml` and selects a
+project the same way the playbooks do (vault key, `project_name`, or
+`project_id`). See
+[OpenStack Launch Networking](../README.md#openstack-launch-networking).
+
 ## vSphere Vault
 
 `vaults/vsphere.yml`
@@ -155,7 +160,9 @@ vsphere_projects:
 ```
 
 Select a vCenter with `-e vsphere_target_vcenter=<key-or-hostname>`. A
-single-entry map is auto-selected. The optional guest-login `ssh_*` keys may also be set flat at
-the top level or with `-e`, which override the selected entry; unset values fall
-back to the inventory, ssh-agent, or `~/.ssh/config`. The selected vCenter key is recorded in
-image-catalog scope so same-named content libraries remain distinct.
+single-entry map is auto-selected. The optional guest-login `ssh_*` keys may
+also be set flat at the top level or with `-e`, which override the selected
+entry; unset values fall back to the inventory, ssh-agent, or `~/.ssh/config`.
+Each migration catalog row records the selected vCenter key as
+`source_vcenter_key` (or `legacy` for the flat mapping) alongside
+`source_vcenter`, so a row names the vCenter it came from.

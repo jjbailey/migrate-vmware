@@ -12,7 +12,6 @@
     migration_succeeded: false
     snapshot_cleanup_required: false
     clone_cleanup_required: false
-    openstack_uploaded_image_ids: []
     openstack_uploaded_image_names: []
     openstack_image_ids: []
     openstack_image_names: []

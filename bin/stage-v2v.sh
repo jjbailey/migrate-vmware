@@ -12,6 +12,11 @@
 set -euo pipefail
 
 script_dir=$(CDPATH= builtin cd -- "$(dirname -- "${BASH_SOURCE[0]}")" > /dev/null && builtin pwd -P)
+wrapper_name=stage-v2v
+export wrapper_name
+# shellcheck source=wrapper-common.sh
+# shellcheck disable=SC1091
+source "$script_dir/wrapper-common.sh"
 repo_dir=$(CDPATH= builtin cd -- "$script_dir/.." > /dev/null && builtin pwd -P)
 
 usage()
@@ -69,12 +74,12 @@ fi
 
 # The playbook matches vsphere_target_vcenter against a vault key or a
 # vcenter_hostname, so the vCenter goes in under that name.
-extra_vars=(-e "vsphere_target_vcenter=$vcenter_hostname")
+extra_vars=(-e "$(wrapper_var vsphere_target_vcenter "$vcenter_hostname")")
 if [ -n "$ssh_username" ] ; then
-    extra_vars+=(-e "ssh_username=$ssh_username")
+    extra_vars+=(-e "$(wrapper_var ssh_username "$ssh_username")")
 fi
 if [ -n "$ssh_private_key_file" ] ; then
-    extra_vars+=(-e "ssh_private_key_file=$ssh_private_key_file")
+    extra_vars+=(-e "$(wrapper_var ssh_private_key_file "$ssh_private_key_file")")
 fi
 
 cd "$repo_dir"

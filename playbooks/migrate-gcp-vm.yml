@@ -22,9 +22,13 @@
     resume_run_id: ""
     artifact_root: "/var/tmp/migrate-vmware"
     # Imports now run concurrently, so the poll delay is the tail latency on
-    # every disk rather than on the run as a whole; keep it short.
-    gcp_import_poll_retries: 240
+    # every disk rather than on the run as a whole; keep it short. 960 x 15s
+    # is a four-hour window, enough for a large disk.
+    gcp_import_poll_retries: 960
     gcp_import_poll_delay: 15
+    # After a failure with discard_failed_artifacts, how long cleanup waits for
+    # cancelled imports to stop before deleting their images (120 x 15s).
+    gcp_cancel_poll_retries: 120
     gcp_delete_poll_retries: 40
     gcp_delete_poll_delay: 3
     gcp_image_lookup_retries: 20

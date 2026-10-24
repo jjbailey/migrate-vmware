@@ -1,0 +1,80 @@
+---
+# playbooks/tasks/migration/common/check-curl-disks-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Checks that only the curl backend needs: every disk must be one flat file,
+# and vCenter must serve it. prepare-source-manifest.yml runs them on a fresh
+# run before the snapshot; resume-vddk.yml runs them again on a curl resume,
+# where the VM may have changed since (powered on, for one) and an older
+# manifest may not record which backend read it.
+#
+# Expects: curl_check_disks (manifest disk entries with path and
+# snapshot_chain_depth), vm_name, datacenter, vcenter_hostname,
+# vcenter_username, vcenter_password, validate_certs.
+
+- name: Require disks with no snapshot chain for the curl backend
+  # curl reads each disk as one raw -flat.vmdk file; a snapshot chain (delta or
+  # SE sparse files) is not. VixDiskLib reads the chain itself.
+  ansible.builtin.assert:
+    that: >-
+      curl_check_disks
+      | selectattr('snapshot_chain_depth', 'gt', 0) | list | length == 0
+    fail_msg: >-
+      {% if migration_resume_mode | default(false) | bool %}
+      Run {{ migration_run_id }} recorded '{{ vm_name }}' with snapshots, so its
+      disks are not single flat files and the curl backend would read only the
+      stale base files. Resume with -e openstack_vddk_backend=vddk, or discard
+      the run with -e discard_run_id={{ migration_run_id }}.
+      {% else %}
+      '{{ vm_name }}' already has snapshots, so its disks are not single flat
+      files and the curl backend cannot read them. Delete or consolidate the
+      snapshots, or use the vddk backend.
+      {% endif %}
+
+# vCenter's /folder endpoint cannot open a disk that ESXi holds locked: on VMFS
+# a powered-on VM's -flat.vmdk is, and every read of it is HTTP 500 (NFS
+# datastores lock differently and serve it). Ask for each file once here, so
+# such a VM is refused before anything is created or streamed instead of
+# failing at its first read.
+- name: Check that vCenter serves each flat disk file for the curl backend
+  vars:
+    # "[datastore] dir/disk.vmdk" is served as dir/disk-flat.vmdk, as in
+    # openstack/convert-disk-vddk.yml.
+    flat_datastore: "{{ item.path | regex_replace('^\\[([^\\]]+)\\].*$', '\\1') }}"
+    flat_relative: "{{ item.path | regex_replace('^\\[[^\\]]+\\]\\s*(.*)\\.vmdk$', '\\1') }}-flat.vmdk"
+  ansible.builtin.uri:
+    url: >-
+      https://{{ vcenter_hostname }}/folder/{{ flat_relative | urlencode }}?dcPath={{ datacenter | urlencode }}&dsName={{ flat_datastore | urlencode }}
+    method: HEAD
+    url_username: "{{ vcenter_username }}"
+    url_password: "{{ vcenter_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ validate_certs | bool }}"
+    ca_path: "{{ openstack_vddk_ca_bundle if (openstack_vddk_ca_bundle | default('') | length > 0) else omit }}"
+    status_code: [200]
+  register: curl_flat_check
+  failed_when: false
+  loop: "{{ curl_check_disks }}"
+  loop_control:
+    label: "{{ item.path }}"
+  no_log: true
+
+- name: Fail if vCenter cannot serve a flat disk file
+  vars:
+    flat_failures: >-
+      {{ curl_flat_check.results | default([])
+         | rejectattr('skipped', 'defined') | rejectattr('status', 'equalto', 200) | list }}
+  ansible.builtin.fail:
+    msg: >-
+      vCenter would not serve
+      {{ flat_failures | map(attribute='item.path') | join(', ') }} to the curl backend
+      (HTTP {{ flat_failures | map(attribute='status') | map('string') | unique | join(', ') }}).
+      {% if flat_failures | selectattr('status', 'equalto', 500) | list | length > 0 %}
+      On a VMFS datastore a powered-on VM's disks are locked against this kind of
+      read: power off '{{ vm_name }}', or use the vddk backend, which reads through
+      the migration snapshot.
+      {% else %}
+      {{ flat_failures | map(attribute='msg') | first | default('') }}
+      {% endif %}
+  when: flat_failures | length > 0
+

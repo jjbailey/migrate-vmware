@@ -1,0 +1,246 @@
+---
+# playbooks/tasks/migration/openstack/preflight-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# OpenStack credentials and prerequisites for the datastore-direct path: the
+# checks in preflight.yml plus nbdkit, and the backend that reads the disks:
+# VixDiskLib through nbdkit's vddk plugin, or nbdkit's curl plugin.
+#
+# Supports many projects at once: vaults/openstack.yml holds an
+# openstack_projects mapping and one run selects a single project with
+# -e openstack_target_project=<name>. A legacy vault holding only
+# openstack_auth still works unmodified.
+
+- name: Select the OpenStack project for this run
+  ansible.builtin.import_tasks: select-project.yml
+
+- name: Check qemu-img
+  ansible.builtin.command: "{{ qemu_img_bin }} --version"
+  register: qemu_img_check
+  failed_when: qemu_img_check.rc != 0
+  changed_when: false
+
+- name: Check nbdkit
+  ansible.builtin.command: "{{ openstack_vddk_nbdkit_bin }} --version"
+  register: nbdkit_check
+  failed_when: nbdkit_check.rc != 0
+  changed_when: false
+
+- name: Validate the disk backend setting
+  ansible.builtin.assert:
+    that: openstack_vddk_backend in ['auto', 'vddk', 'curl']
+    fail_msg: "openstack_vddk_backend must be auto, vddk, or curl (got '{{ openstack_vddk_backend }}')."
+
+# --dump-plugin loads the plugin and then VixDiskLib itself, so a missing
+# plugin, a missing library, or a broken library layout all show up here.
+- name: Probe the nbdkit vddk plugin and VixDiskLib
+  ansible.builtin.command:
+    argv: "{{ [openstack_vddk_nbdkit_bin, 'vddk']
+              + (['libdir=' ~ openstack_vddk_libdir] if (openstack_vddk_libdir | length > 0) else [])
+              + ['--dump-plugin'] }}"
+  register: nbdkit_vddk_check
+  failed_when: false
+  changed_when: false
+  when: openstack_vddk_backend in ['auto', 'vddk']
+
+# The plugin and the library fail differently and need different fixes. A
+# missing plugin is "cannot open plugin" (some distributions, Ubuntu among
+# them, do not package it); a plugin that finds no VixDiskLib still exits 0
+# but reports no vddk_library_version.
+- name: Explain why the vddk backend cannot load
+  vars:
+    vddk_search_dir: >-
+      {{ openstack_vddk_libdir if (openstack_vddk_libdir | length > 0)
+         else (nbdkit_vddk_check.stdout_lines | select('match', 'vddk_default_libdir=')
+               | map('regex_replace', '^vddk_default_libdir=', '') | first | default("the plugin's default libdir")) }}
+  ansible.builtin.set_fact:
+    openstack_vddk_unavailable_reason: >-
+      {{ "nbdkit's vddk plugin is not installed; this nbdkit package does not include it, so build it as doc/datastore-direct.md describes"
+         if 'cannot open plugin' in nbdkit_vddk_check.stderr
+         else (("nbdkit's vddk plugin found no VixDiskLib: " ~ vddk_search_dir
+                ~ "/lib64/libvixDiskLib.so.8 is missing (see doc/datastore-direct.md, or set openstack_vddk_libdir)")
+               if nbdkit_vddk_check.rc == 0
+               else ("nbdkit's vddk plugin did not load: "
+                  ~ ((nbdkit_vddk_check.stderr | default('', true)) or (nbdkit_vddk_check.msg | default(''))) | trim | truncate(300))) }}
+  when:
+    - openstack_vddk_backend in ['auto', 'vddk']
+    - not (nbdkit_vddk_check.rc == 0 and 'vddk_library_version=' in nbdkit_vddk_check.stdout)
+
+- name: Fail when the vddk backend was requested but cannot load
+  ansible.builtin.fail:
+    msg: >-
+      {{ openstack_vddk_unavailable_reason }}. Pass
+      -e openstack_vddk_backend=curl to read the disks without it.
+  when:
+    - openstack_vddk_backend == 'vddk'
+    - not (nbdkit_vddk_check.rc == 0 and 'vddk_library_version=' in nbdkit_vddk_check.stdout)
+
+# A resume must read the disks the way the run it continues did. Were auto to
+# fall back from vddk to curl, curl would read only the base -flat.vmdk of a VM
+# that had snapshots and upload a stale image, so the backend the manifest
+# records is reused and a resume that cannot use it fails. The manifest path
+# mirrors initialize-vddk.yml, which runs after this file. A discard reads no
+# disks, so it skips this.
+- name: Check the manifest of the run being resumed
+  ansible.builtin.stat:
+    path: >-
+      {{ artifact_root }}/openstack/{{ vm_name | regex_replace('[^A-Za-z0-9_.-]', '_') }}/{{ resume_run_id }}/artifact-manifest.json
+  register: resume_backend_manifest_stat
+  when:
+    - resume_run_id | length > 0
+    - not (migration_discard_only | default(false) | bool)
+
+- name: Load the manifest of the run being resumed
+  ansible.builtin.slurp:
+    src: "{{ resume_backend_manifest_stat.stat.path }}"
+  register: resume_backend_manifest_file
+  when:
+    - resume_backend_manifest_stat is not skipped
+    - resume_backend_manifest_stat.stat.exists
+
+# A missing manifest is reported by common/resume-vddk.yml.
+- name: Record the disk backend of the run being resumed
+  ansible.builtin.set_fact:
+    resume_backend_manifest: "{{ resume_backend_manifest_file.content | b64decode | from_json }}"
+    openstack_vddk_backend_recorded: >-
+      {{ (resume_backend_manifest_file.content | b64decode | from_json).transfer_backend | default('') | string }}
+  when: resume_backend_manifest_file is not skipped
+
+- name: Validate the recorded disk backend
+  ansible.builtin.assert:
+    that: openstack_vddk_backend_recorded in ['vddk', 'curl']
+    fail_msg: >-
+      The manifest of run {{ resume_run_id }} records an unknown
+      transfer_backend '{{ openstack_vddk_backend_recorded }}'.
+  when: openstack_vddk_backend_recorded | default('') | length > 0
+
+- name: Fail when the requested backend differs from the resumed run's
+  ansible.builtin.fail:
+    msg: >-
+      Run {{ resume_run_id }} read its disks with the
+      {{ openstack_vddk_backend_recorded }} backend, and a resume must use the
+      same one, but -e openstack_vddk_backend={{ openstack_vddk_backend }} was
+      passed. Resume with -e openstack_vddk_backend={{ openstack_vddk_backend_recorded }}
+      (or auto), or discard the run with -e discard_run_id={{ resume_run_id }}
+      and start a new one.
+  when:
+    - openstack_vddk_backend_recorded | default('') | length > 0
+    - openstack_vddk_backend not in ['auto', openstack_vddk_backend_recorded]
+
+- name: Fail when the resumed run's vddk backend cannot load
+  ansible.builtin.fail:
+    msg: >-
+      {{ openstack_vddk_unavailable_reason }}. Run {{ resume_run_id }} read its
+      disks through VixDiskLib, and the curl fallback cannot stand in for it on
+      a resume: it could read stale base disk files. Make the vddk backend
+      load again, or discard the run with -e discard_run_id={{ resume_run_id }}
+      and start a new one.
+  when:
+    - openstack_vddk_backend_recorded | default('') == 'vddk'
+    - not (nbdkit_vddk_check.rc == 0 and 'vddk_library_version=' in nbdkit_vddk_check.stdout)
+
+- name: Choose the disk backend for this run
+  ansible.builtin.set_fact:
+    openstack_vddk_backend_effective: >-
+      {{ openstack_vddk_backend_recorded
+         if (openstack_vddk_backend_recorded | default('') | length > 0)
+         else ('curl' if openstack_vddk_backend == 'curl'
+               else ('vddk' if (nbdkit_vddk_check.rc == 0
+                                and 'vddk_library_version=' in nbdkit_vddk_check.stdout)
+                     else 'curl')) }}
+
+- name: Warn when the resumed run's manifest does not record its backend
+  ansible.builtin.debug:
+    msg: >-
+      The manifest of run {{ resume_run_id }} predates transfer_backend, so
+      this resume cannot confirm it reads the disks the way that run did. It
+      uses the {{ openstack_vddk_backend_effective }} backend{{
+      '; the curl checks run again against the recorded disks before any is read'
+      if openstack_vddk_backend_effective == 'curl' else '' }}.
+  when:
+    - resume_backend_manifest_file is not skipped
+    - openstack_vddk_backend_recorded | default('') | length == 0
+
+- name: Report the disk backend
+  ansible.builtin.debug:
+    msg: >-
+      Reading disks with the {{ openstack_vddk_backend_effective }} backend{{
+      (' (recorded by run ' ~ resume_run_id ~ ')')
+      if (openstack_vddk_backend_recorded | default('') | length > 0)
+      else ((' (auto fell back to curl: ' ~ openstack_vddk_unavailable_reason ~ ')')
+            if (openstack_vddk_backend == 'auto' and openstack_vddk_backend_effective == 'curl') else '') }}.
+
+- name: Check the nbdkit curl plugin
+  # Reads flat disk files from vCenter's datastore /folder endpoint.
+  ansible.builtin.command: "{{ openstack_vddk_nbdkit_bin }} curl --version"
+  register: nbdkit_curl_check
+  failed_when: nbdkit_curl_check.rc != 0
+  changed_when: false
+  when: openstack_vddk_backend_effective == 'curl'
+
+- name: Check the vCenter CA bundle
+  # An unreadable or non-PEM bundle would otherwise surface later as a
+  # certificate failure that does not name the bundle. openssl x509 reads the
+  # first certificate, so a bundle of several CAs passes.
+  ansible.builtin.command: openssl x509 -in {{ openstack_vddk_ca_bundle | quote }} -noout -subject
+  register: vcenter_ca_bundle_check
+  failed_when: false
+  changed_when: false
+  when: openstack_vddk_ca_bundle | length > 0
+
+- name: Fail if the vCenter CA bundle is unusable
+  ansible.builtin.fail:
+    msg: >-
+      openstack_vddk_ca_bundle {{ openstack_vddk_ca_bundle }} is not a readable
+      PEM certificate: {{ (vcenter_ca_bundle_check.stderr | default('')) | trim | truncate(300) }}
+  when:
+    - vcenter_ca_bundle_check is not skipped
+    - vcenter_ca_bundle_check.rc != 0
+
+- name: Check that the nbdkit curl plugin accepts cainfo
+  # The plugin is known to load (checked above), so a missing cainfo in its
+  # help means a plugin too old for the parameter, which nbdkit would
+  # otherwise reject at stream start as an unknown parameter.
+  ansible.builtin.command: "{{ openstack_vddk_nbdkit_bin }} curl --help"
+  register: nbdkit_curl_help
+  failed_when: "'cainfo=' not in nbdkit_curl_help.stdout"
+  changed_when: false
+  when:
+    - openstack_vddk_backend_effective == 'curl'
+    - openstack_vddk_ca_bundle | length > 0
+
+# VixDiskLib trusts exactly the thumbprint it is given, so with validate_certs
+# the certificate is verified (chain and host name) before its thumbprint is
+# taken; otherwise whoever answered on port 443 would be trusted.
+- name: Read the vCenter certificate thumbprint for VixDiskLib
+  ansible.builtin.shell: |
+    set -o pipefail
+    openssl s_client -connect {{ (vcenter_hostname ~ ':443') | quote }} -servername {{ vcenter_hostname | quote }} \
+      {{ ('-verify_return_error -verify_hostname ' ~ (vcenter_hostname | quote)) if (validate_certs | bool) else '' }} \
+      {{ ('-CAfile ' ~ (openstack_vddk_ca_bundle | quote)) if (openstack_vddk_ca_bundle | length > 0) else '' }} \
+      < /dev/null 2> /dev/null |
+      openssl x509 -noout -fingerprint -sha1 | sed 's/^.*=//'
+  args:
+    executable: /bin/bash
+  register: vcenter_thumbprint
+  changed_when: false
+  failed_when: false
+  when:
+    - openstack_vddk_backend_effective == 'vddk'
+    - openstack_vddk_thumbprint | length == 0
+
+- name: Fail if the vCenter certificate could not be read or verified
+  ansible.builtin.assert:
+    that: vcenter_thumbprint.stdout | trim is match('^([0-9A-F]{2}:){19}[0-9A-F]{2}$')
+    fail_msg: >-
+      Could not {{ 'verify' if (validate_certs | bool) else 'read' }} the
+      certificate of {{ vcenter_hostname }}:443.
+      {{ 'Install its CA on this host or pass it as -e openstack_vddk_ca_bundle=<PEM>, set validate_certs=false for this vCenter, or pass -e openstack_vddk_thumbprint=<SHA-1>.'
+         if (validate_certs | bool) else 'Check that the host answers on port 443.' }}
+  when: vcenter_thumbprint is not skipped
+
+- name: Record the vCenter thumbprint
+  ansible.builtin.set_fact:
+    openstack_vddk_thumbprint: "{{ vcenter_thumbprint.stdout | trim }}"
+  when: vcenter_thumbprint is not skipped
+

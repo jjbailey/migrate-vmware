@@ -31,21 +31,21 @@ wrapper_require_bool GCP_NO_ADDRESS "$GCP_NO_ADDRESS"
 wrapper_require_json_array GCP_TAGS_JSON "$GCP_TAGS_JSON"
 
 args=()
-[ -n "$VM_NAME" ] && args+=(-e "vm_name=$VM_NAME")
-[ -n "$GCP_ZONE" ] && args+=(-e "gcp_zone=$GCP_ZONE")
-[ -n "$GCP_TARGET_PROJECT" ] && args+=(-e "gcp_target_project=$GCP_TARGET_PROJECT")
-[ -n "$GCP_MACHINE_TYPE" ] && args+=(-e "gcp_machine_type=$GCP_MACHINE_TYPE")
-[ -n "$GCP_NETWORK" ] && args+=(-e "gcp_network=$GCP_NETWORK")
-[ -n "$GCP_SUBNETWORK" ] && args+=(-e "gcp_subnetwork=$GCP_SUBNETWORK")
-[ "$GCP_NO_ADDRESS" = true ] && args+=(-e "gcp_no_address=true")
-[ "$GCP_TAGS_JSON" != '[]' ] && args+=(-e "{\"gcp_tags\": $GCP_TAGS_JSON}")
+[ -n "$VM_NAME" ] && args+=(-e "$(wrapper_var vm_name "$VM_NAME")")
+[ -n "$GCP_ZONE" ] && args+=(-e "$(wrapper_var gcp_zone "$GCP_ZONE")")
+[ -n "$GCP_TARGET_PROJECT" ] && args+=(-e "$(wrapper_var gcp_target_project "$GCP_TARGET_PROJECT")")
+[ -n "$GCP_MACHINE_TYPE" ] && args+=(-e "$(wrapper_var gcp_machine_type "$GCP_MACHINE_TYPE")")
+[ -n "$GCP_NETWORK" ] && args+=(-e "$(wrapper_var gcp_network "$GCP_NETWORK")")
+[ -n "$GCP_SUBNETWORK" ] && args+=(-e "$(wrapper_var gcp_subnetwork "$GCP_SUBNETWORK")")
+[ "$GCP_NO_ADDRESS" = true ] && args+=(-e "$(wrapper_var gcp_no_address "true")")
+[ "$GCP_TAGS_JSON" != '[]' ] && args+=(-e "$(wrapper_json_var gcp_tags "$GCP_TAGS_JSON")")
 if [ -n "$GCP_SSH_KEY_FILE" ] ; then
     if [ ! -r "$GCP_SSH_KEY_FILE" ] ; then
         echo "${wrapper_name}: GCP_SSH_KEY_FILE is not readable: $GCP_SSH_KEY_FILE" >&2
         exit 1
     fi
-    args+=(-e "gcp_ssh_user=$GCP_SSH_USER")
-    args+=(-e "gcp_ssh_public_key_file=$GCP_SSH_KEY_FILE")
+    args+=(-e "$(wrapper_var gcp_ssh_user "$GCP_SSH_USER")")
+    args+=(-e "$(wrapper_var gcp_ssh_public_key_file "$GCP_SSH_KEY_FILE")")
 fi
 
 wrapper_run_playbook playbooks/launch-gcp-instance.yml "${args[@]}" "${wrapper_extra_args[@]}" -v

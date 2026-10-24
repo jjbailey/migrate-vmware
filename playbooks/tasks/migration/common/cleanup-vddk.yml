@@ -1,0 +1,166 @@
+---
+# playbooks/tasks/migration/common/cleanup-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Best-effort cleanup for the datastore-direct path. A copy of cleanup.yml with
+# two differences: there is no clone to delete, and the migration snapshot is
+# the resume checkpoint, so it is removed only after success or an explicit
+# discard. A failed run keeps it: -e resume_run_id=<id> reads from it again,
+# and -e discard_run_id=<id> removes it with the rest of that run. Until then
+# the VM keeps accruing writes in the snapshot delta, which is why the
+# retained-run message names the snapshot.
+
+# The resumable run directory. GCP and OpenStack always derive
+# migration_run_dir and can resume from it, so it is removed on success or
+# explicit discard, and otherwise kept with a resume hint. AWS does not resume:
+# it defines migration_run_dir only when an operator supplies one, which is
+# theirs and must not be deleted, and aws/cleanup.yml reports its retained S3
+# object instead. These run first, the same point in the always: sequence as
+# when they lived in each platform's cleanup.yml.
+- name: Remove persistent artifacts after success or explicit discard
+  ansible.builtin.file:
+    path: "{{ migration_run_dir }}"
+    state: absent
+  when:
+    - migration_target in ['gcp', 'openstack']
+    - (migration_succeeded | default(false) | bool) or (discard_failed_artifacts | bool)
+  failed_when: false
+
+# A run refused by a check before its snapshot (an unsupported disk, a disk
+# the curl backend cannot read) wrote no manifest and took no snapshot, so it
+# has nothing to resume or discard; keeping its empty run directory and
+# printing resume advice would only send the operator after it. A resumed run
+# keeps its directory regardless: the run being resumed owns it.
+- name: Check whether the failed run left a manifest
+  ansible.builtin.stat:
+    path: "{{ artifact_manifest_path }}"
+  register: cleanup_manifest_stat
+  when:
+    - migration_target in ['gcp', 'openstack']
+    - not (migration_succeeded | default(false) | bool)
+    - not (discard_failed_artifacts | bool)
+
+- name: Note whether the failed run has anything to resume
+  ansible.builtin.set_fact:
+    migration_nothing_to_resume: >-
+      {{ not (migration_resume_mode | default(false) | bool)
+         and not (snapshot_cleanup_required | default(false) | bool)
+         and not (cleanup_manifest_stat.stat.exists | default(false)) }}
+  when: cleanup_manifest_stat is not skipped
+
+- name: Remove the run directory of a run that stopped before its snapshot
+  ansible.builtin.file:
+    path: "{{ migration_run_dir }}"
+    state: absent
+  when: migration_nothing_to_resume | default(false) | bool
+  failed_when: false
+
+- name: Report a run that stopped before creating anything
+  ansible.builtin.debug:
+    msg: >-
+      Migration stopped before taking a snapshot or uploading anything, so
+      there is nothing to resume or discard. Correct the failure and start a
+      new run.
+  when: migration_nothing_to_resume | default(false) | bool
+
+# A fresh run that failed after taking its snapshot but before writing its
+# manifest cannot be resumed (resume-vddk.yml refuses a run with no manifest),
+# so only a discard is offered for it.
+- name: Note whether the failed run can be resumed
+  ansible.builtin.set_fact:
+    migration_resumable: >-
+      {{ (migration_resume_mode | default(false) | bool)
+         or (cleanup_manifest_stat.stat.exists | default(false)) }}
+  when: cleanup_manifest_stat is not skipped
+
+- name: Report retained artifacts for a resumable failed run
+  ansible.builtin.debug:
+    msg: >-
+      Migration did not complete. Artifacts were retained at
+      {{ migration_run_dir }}{{ (", and snapshot '" ~ snapshot_name ~ "' was kept on the source VM as the resume checkpoint") if (snapshot_cleanup_required | default(false) | bool) else "" }}. Resume with
+      -e resume_run_id={{ migration_run_id }} after correcting the failure, or
+      discard the run (snapshot, run directory, and uploaded images) with
+      -e discard_run_id={{ migration_run_id }}. Do not leave a retained snapshot
+      in place: its delta keeps growing.
+  when:
+    - migration_target in ['gcp', 'openstack']
+    - not (migration_succeeded | default(false) | bool)
+    - not (discard_failed_artifacts | bool)
+    - not (migration_nothing_to_resume | default(false) | bool)
+    - migration_resumable | default(true) | bool
+
+- name: Report a failed run that kept its snapshot but cannot be resumed
+  ansible.builtin.debug:
+    msg: >-
+      Migration failed after creating (or starting to create) snapshot
+      '{{ snapshot_name }}' on '{{ vm_name }}' but before writing
+      {{ artifact_manifest_path }}, so this run cannot be resumed. Discard it
+      with -e discard_run_id={{ migration_run_id }}, which removes the snapshot
+      and {{ migration_run_dir }}, then start a new run. Do not leave the
+      snapshot in place: its delta keeps growing until it is removed.
+  when:
+    - migration_target in ['gcp', 'openstack']
+    - not (migration_succeeded | default(false) | bool)
+    - not (discard_failed_artifacts | bool)
+    - not (migration_nothing_to_resume | default(false) | bool)
+    - not (migration_resumable | default(true) | bool)
+
+- name: Remove the temporary catalog entry
+  ansible.builtin.file:
+    path: "{{ catalog_entry_path }}"
+    state: absent
+  register: cleanup_catalog_entry
+  failed_when: false
+
+- name: Remove the NBD socket directory
+  ansible.builtin.file:
+    path: "{{ openstack_vddk_socket_dir }}"
+    state: absent
+  when: openstack_vddk_socket_dir is defined
+  register: cleanup_sockets
+  failed_when: false
+
+- name: Remove the snapshot from the source VM
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ govc_bin }}"
+      - snapshot.remove
+      - "-vm={{ source_vm_path }}"
+      - "{{ snapshot_name }}"
+  when:
+    - snapshot_cleanup_required | default(false) | bool
+    - source_vm_path is defined
+    - (migration_succeeded | default(false) | bool) or (discard_failed_artifacts | bool)
+  no_log: true
+  changed_when: true
+  register: cleanup_snapshot
+  failed_when: false
+
+- name: Warn about best-effort cleanup failures
+  ansible.builtin.debug:
+    msg: >-
+      Best-effort cleanup did not remove every vSphere/catalog artifact. Check
+      the run output and remove any remaining snapshot, socket directory, or temp file.
+  when: >-
+    (cleanup_catalog_entry.failed | default(false) | bool) or
+    (cleanup_sockets.failed | default(false) | bool) or
+    (cleanup_snapshot.failed | default(false) | bool)
+
+- name: Report the discarded run
+  vars:
+    discard_snapshot_text: >-
+      {{ ("snapshot '" ~ snapshot_name ~ "'") if (snapshot_cleanup_required | default(false) | bool)
+         else 'no snapshot (none was left)' }}
+    discard_image_names: "{{ openstack_uploaded_image_names | default([]) }}"
+  ansible.builtin.debug:
+    msg: >-
+      Discarded run {{ migration_run_id }}: removed {{ migration_run_dir }},
+      {{ discard_snapshot_text }}, and {{ discard_image_names | length }} image(s){{
+      (': ' ~ (discard_image_names | join(', '))) if (discard_image_names | length > 0) else '' }}.
+  when: migration_discard_only | default(false) | bool
+

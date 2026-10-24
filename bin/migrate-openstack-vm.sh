@@ -17,20 +17,20 @@ VM_NAME=${VM_NAME:-}
 VALIDATE_CERTS=${VALIDATE_CERTS:-}
 QUIESCE_SNAPSHOT=${QUIESCE_SNAPSHOT:-true}
 OS_PROJECT_NAME=${OS_PROJECT_NAME:-}
-ARTIFACT_ROOT=${ARTIFACT_ROOT:-/work/migrate-vmware}
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-/var/tmp/migrate-vmware}
 
 wrapper_require_bool VALIDATE_CERTS "$VALIDATE_CERTS"
 wrapper_require_bool QUIESCE_SNAPSHOT "$QUIESCE_SNAPSHOT"
 
 args=()
-[ -n "$VM_NAME" ] && args+=(-e "vm_name=$VM_NAME")
-[ -n "$VSPHERE_TARGET_VCENTER" ] && args+=(-e "vsphere_target_vcenter=$VSPHERE_TARGET_VCENTER")
+[ -n "$VM_NAME" ] && args+=(-e "$(wrapper_var vm_name "$VM_NAME")")
+[ -n "$VSPHERE_TARGET_VCENTER" ] && args+=(-e "$(wrapper_var vsphere_target_vcenter "$VSPHERE_TARGET_VCENTER")")
 if [ -z "$VSPHERE_TARGET_VCENTER" ] && [ -n "$VCENTER_DATACENTER" ] ; then
-    args+=(-e "datacenter=$VCENTER_DATACENTER")
+    args+=(-e "$(wrapper_var datacenter "$VCENTER_DATACENTER")")
 fi
-[ -n "$VALIDATE_CERTS" ] && args+=(-e "validate_certs=$VALIDATE_CERTS")
-args+=(-e "quiesce_snapshot=$QUIESCE_SNAPSHOT")
-[ -n "$OS_PROJECT_NAME" ] && args+=(-e "openstack_target_project=$OS_PROJECT_NAME")
-[ -n "$ARTIFACT_ROOT" ] && args+=(-e "artifact_root=$ARTIFACT_ROOT")
+[ -n "$VALIDATE_CERTS" ] && args+=(-e "$(wrapper_var validate_certs "$VALIDATE_CERTS")")
+args+=(-e "$(wrapper_var quiesce_snapshot "$QUIESCE_SNAPSHOT")")
+[ -n "$OS_PROJECT_NAME" ] && args+=(-e "$(wrapper_var openstack_target_project "$OS_PROJECT_NAME")")
+[ -n "$ARTIFACT_ROOT" ] && args+=(-e "$(wrapper_var artifact_root "$ARTIFACT_ROOT")")
 
 wrapper_run_playbook playbooks/migrate-openstack-vm.yml "${args[@]}" "${wrapper_extra_args[@]}" -v

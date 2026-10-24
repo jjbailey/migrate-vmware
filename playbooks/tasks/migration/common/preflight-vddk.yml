@@ -1,0 +1,30 @@
+---
+# playbooks/tasks/migration/common/preflight-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# vSphere credentials and tools for the datastore-direct path. A copy of
+# preflight.yml without the ovftool check: no OVF export happens here.
+
+- name: Resolve the vCenter credentials from the vault
+  ansible.builtin.import_tasks: select-vcenter.yml
+
+- name: Assert the vSphere credentials and GOVC settings exist
+  ansible.builtin.assert:
+    that:
+      - vcenter_hostname is defined and vcenter_hostname | length > 0
+      - vcenter_username is defined and vcenter_username | length > 0
+      - vcenter_password is defined and vcenter_password | length > 0
+      - GOVC_URL is defined and GOVC_URL | length > 0
+      - GOVC_USERNAME is defined and GOVC_USERNAME | length > 0
+      - GOVC_PASSWORD is defined and GOVC_PASSWORD | length > 0
+      - GOVC_INSECURE is defined
+    fail_msg: >-
+      vaults/vsphere.yml must define the vCenter and GOVC credentials.
+  no_log: true
+
+- name: Check govc
+  ansible.builtin.command: which "{{ govc_bin }}"
+  register: govc_check
+  failed_when: govc_check.rc != 0
+  changed_when: false
+

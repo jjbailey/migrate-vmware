@@ -61,6 +61,7 @@
     - (aws_region | string | trim | length) > 0
     - s3_bucket is defined
     - vmimport_role_name is defined
+  no_log: true
 
 - name: Auto-select the only AWS project when no target was requested
   ansible.builtin.set_fact:

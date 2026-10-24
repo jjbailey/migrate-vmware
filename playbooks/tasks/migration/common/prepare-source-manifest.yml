@@ -1,0 +1,123 @@
+---
+# playbooks/tasks/migration/common/prepare-source-manifest.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Resolve and snapshot one vSphere VM and build its disk manifest, with no
+# clone and no export. The datastore-direct counterpart of export-ova.yml: the
+# snapshot freezes the source disks and they are then streamed from where they
+# are.
+#
+# Required inputs:
+#   datacenter, vm_name, validate_certs, quiesce_snapshot, snapshot_name,
+#   migration_target, openstack_vddk_require_cbt, openstack_vddk_backend_effective
+# Outputs:
+#   source_vm_path, source_vm_folder, source_vm_moref, source_snapshot_moref
+#   (vddk backend), artifact_manifest
+
+- name: Resolve the source VM inventory path
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command: >-
+    {{ govc_bin }} find /{{ datacenter }}/vm -type m -name "{{ vm_name }}"
+  register: source_vm_find
+  changed_when: false
+  failed_when: source_vm_find.rc != 0 or (source_vm_find.stdout_lines | length != 1)
+
+- name: Record the source inventory path
+  ansible.builtin.set_fact:
+    source_vm_path: "{{ source_vm_find.stdout | trim }}"
+    source_vm_folder: "{{ source_vm_find.stdout | trim | regex_replace('/[^/]+$', '') }}"
+
+- name: Read the source VM configuration before the snapshot
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command: >-
+    {{ govc_bin }} vm.info -json "{{ source_vm_path }}"
+  register: source_vm_info
+  changed_when: false
+  failed_when: source_vm_info.rc != 0
+  no_log: true
+
+- name: Record the source VM reference and whether it tracks changed blocks
+  ansible.builtin.set_fact:
+    source_vm_moref: "{{ (source_vm_info.stdout | from_json).virtualMachines[0].Self.value }}"
+    source_vm_cbt_enabled: >-
+      {{ (source_vm_info.stdout | from_json).virtualMachines[0].config.changeTrackingEnabled | default(false) | bool }}
+  no_log: true
+
+- name: Require Changed Block Tracking on the source VM
+  ansible.builtin.assert:
+    that: source_vm_cbt_enabled | bool
+    fail_msg: >-
+      CBT is not enabled on '{{ vm_name }}'. Enable it first with
+      bin/enable-cbt.py (no power cycle), or leave
+      -e openstack_vddk_require_cbt=false (the default).
+  when: openstack_vddk_require_cbt | bool
+
+# Before the snapshot, so a VM with an unsupported disk (independent, shared,
+# raw device mapping, encrypted) is refused without creating anything. The
+# paths in the manifest are the files the snapshot is about to freeze.
+- name: Build the disk manifest from the source VM
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ playbook_dir }}/../bin/inspect-vm.py"
+    # "string" stops Ansible turning the JSON text into a dict (and then Python repr)
+    stdin: "{{ source_vm_info.stdout | string }}"
+  register: vm_manifest_result
+  changed_when: false
+
+# Still before the snapshot, so a VM the curl backend cannot read is refused
+# before anything is created.
+- name: Run the curl backend's disk checks
+  ansible.builtin.include_tasks: check-curl-disks-vddk.yml
+  vars:
+    curl_check_disks: "{{ (vm_manifest_result.stdout | from_json).disks }}"
+  when: openstack_vddk_backend_effective == 'curl'
+
+- name: Record source virtual NIC MAC addresses in device order
+  ansible.builtin.set_fact:
+    source_mac_addresses: >-
+      {{ (source_vm_info.stdout | from_json).virtualMachines[0].config.hardware.device
+         | selectattr('macAddress', 'defined')
+         | sort(attribute='key')
+         | map(attribute='macAddress')
+         | list }}
+  no_log: true
+
+- name: Mark the snapshot for best-effort cleanup
+  ansible.builtin.set_fact:
+    snapshot_cleanup_required: true
+
+- name: Create a snapshot of the source VM
+  community.vmware.vmware_guest_snapshot:
+    hostname: "{{ vcenter_hostname }}"
+    username: "{{ vcenter_username }}"
+    password: "{{ vcenter_password }}"
+    validate_certs: "{{ validate_certs | bool }}"
+    datacenter: "{{ datacenter }}"
+    folder: "{{ source_vm_folder }}"
+    name: "{{ vm_name }}"
+    snapshot_name: "{{ snapshot_name }}"
+    state: present
+    description: "Snapshot created for {{ migration_target }} artifact export"
+    quiesce: "{{ quiesce_snapshot }}"
+  no_log: true
+
+- name: Resolve the migration snapshot reference for VixDiskLib
+  ansible.builtin.import_tasks: snapshot-ref-vddk.yml
+  when: openstack_vddk_backend_effective == 'vddk'
+
+- name: Record the target-neutral artifact manifest
+  ansible.builtin.set_fact:
+    artifact_manifest: >-
+      {{ (vm_manifest_result.stdout | from_json)
+         | combine({'source_mac_addresses': source_mac_addresses | default([]),
+                    'transfer_backend': openstack_vddk_backend_effective}) }}
+

@@ -28,14 +28,23 @@
   # order, which a single-threaded default conversion cannot do. The temporary
   # name plus the final mv means an interrupted run never leaves a short qcow2
   # that looks complete.
+  vars:
+    # A list; a string from a bare -e key=value is read as a YAML list when it
+    # looks like one, else split on whitespace.
+    openstack_convert_argv: >-
+      {{ openstack_convert_args if (openstack_convert_args is not string)
+         else ((openstack_convert_args | from_yaml) if (openstack_convert_args | trim).startswith('[')
+               else openstack_convert_args.split()) }}
+  # Every value is shell-quoted: run directories and disk paths come from
+  # operator settings and can hold spaces.
   ansible.builtin.shell: |
     set -eu
-    temporary="{{ openstack_staging_dir }}/disk-{{ openstack_convert_disk.index }}.qcow2.tmp"
+    temporary={{ (openstack_staging_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.qcow2.tmp') | quote }}
     rm -f "$temporary"
-    "{{ qemu_img_bin }}" convert {{ openstack_convert_args | join(' ') }} \
+    {{ qemu_img_bin | quote }} convert {{ openstack_convert_argv | map('string') | map('quote') | join(' ') }} \
       -f vmdk -O qcow2 \
-      "{{ migration_run_dir }}/{{ openstack_convert_disk.path }}" "$temporary"
-    mv -f "$temporary" "{{ openstack_staging_dir }}/disk-{{ openstack_convert_disk.index }}.qcow2"
+      {{ (migration_run_dir ~ '/' ~ openstack_convert_disk.path) | quote }} "$temporary"
+    mv -f "$temporary" {{ (openstack_staging_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.qcow2') | quote }}
   async: "{{ openstack_convert_async_timeout | int }}"
   poll: 0
   register: openstack_convert_started

@@ -60,16 +60,67 @@ def in_project(entry, project_id):
         return bool(project_identity(entry) & {str(item) for item in project_id})
     return str(project_id) in project_identity(entry)
 
+def has_region(entry):
+    recorded = entry.get("openstack_region")
+    return isinstance(recorded, str) and bool(recorded.strip())
+
 def in_region(entry, region_name):
     """Glance, Nova and Cinder IDs are per region; only check this region's rows.
 
     Rows written before openstack_region existed stay in scope, matching
     lookup-migration-openstack.
     """
-    recorded = entry.get("openstack_region")
-    if region_name and isinstance(recorded, str) and recorded.strip():
-        return recorded == region_name
+    if region_name and has_region(entry):
+        return entry.get("openstack_region") == region_name
     return True
+
+def region_checkable(entry, region_name):
+    """Whether a missing resource may remove this row in this region's check.
+
+    A row with no openstack_region may belong to another region, where its
+    resources would look missing from here, so a region-scoped check leaves
+    it alone.
+    """
+    return in_region(entry, region_name) and (
+        not region_name or has_region(entry))
+
+def regionless_rows(migration_catalog, deployment_catalog, project_id, region_name):
+    """Live rows in the project that a region-scoped check skips."""
+    if not region_name:
+        return []
+    return [
+        entry
+        for catalog, list_key, live in (
+            (migration_catalog, "migrations",
+             lambda entry: entry.get("status") == "completed"),
+            (deployment_catalog, "deployments",
+             lambda entry: entry.get("status") != "retired"),
+        )
+        for entry in catalog[list_key]
+        if entry.get("target_platform") == "openstack"
+        and live(entry)
+        and in_project(entry, project_id)
+        and not has_region(entry)
+    ]
+
+def preferred_project_identity(requested_projects, migration_catalog, deployment_catalog):
+    """Pick the requested identity to check against the authenticated project.
+
+    A name/ID alias group may hold both; prefer one recorded as an
+    openstack_project_id, because a non-admin user may not be able to read
+    the current project's name.
+    """
+    recorded_ids = {
+        str(entry.get("openstack_project_id"))
+        for catalog, list_key in (
+            (migration_catalog, "migrations"),
+            (deployment_catalog, "deployments"),
+        )
+        for entry in catalog[list_key]
+        if entry.get("target_platform") == "openstack"
+        and entry.get("openstack_project_id")
+    }
+    return sorted(requested_projects & recorded_ids or requested_projects)[0]
 
 def catalog_project_groups(migration_catalog, deployment_catalog):
     """Group name/ID aliases so one project is not counted twice."""
@@ -166,7 +217,7 @@ def candidate_count(migration_catalog, deployment_catalog, project_id=None, regi
         if entry.get("target_platform") == "openstack"
         and entry.get("status") == "completed"
         and (project_id is None or in_project(entry, project_id))
-        and in_region(entry, region_name)
+        and region_checkable(entry, region_name)
     )
     deployments = sum(
         1
@@ -174,7 +225,7 @@ def candidate_count(migration_catalog, deployment_catalog, project_id=None, regi
         if entry.get("target_platform") == "openstack"
         and entry.get("status") != "retired"
         and (project_id is None or in_project(entry, project_id))
-        and in_region(entry, region_name)
+        and region_checkable(entry, region_name)
     )
     return migrations + deployments
 
@@ -194,7 +245,7 @@ def find_missing_resources(connection, migration_catalog, deployment_catalog, pr
             continue
         if project_id is not None and not in_project(entry, project_id):
             continue
-        if not in_region(entry, region_name):
+        if not region_checkable(entry, region_name):
             continue
         image_ids = entry.get("openstack_image_ids")
         if not isinstance(image_ids, list) or not image_ids:
@@ -220,7 +271,7 @@ def find_missing_resources(connection, migration_catalog, deployment_catalog, pr
             continue
         if project_id is not None and not in_project(entry, project_id):
             continue
-        if not in_region(entry, region_name):
+        if not region_checkable(entry, region_name):
             continue
         server_id = entry.get("openstack_server_id")
         if not server_id:
@@ -391,7 +442,8 @@ def main():
     # One run reconciles one project (see --project-id handling above): a
     # single openstack connection is scoped to one project's auth, so one
     # invocation can only check that project's resources.
-    project_id = next(iter(sorted(requested_projects)))
+    project_id = preferred_project_identity(
+        requested_projects, migration_catalog, deployment_catalog)
     validate_openstack_environment(args.cloud)
     connect_args = {}
     if args.cloud:
@@ -413,6 +465,8 @@ def main():
         connection, migration_catalog, deployment_catalog, authenticated_identities,
         region_name
     )
+    # Retired rows go by status, not by a resource lookup, so a row with no
+    # openstack_region is safe to remove here.
     retired_migrations = [
         entry
         for entry in migration_catalog["migrations"]
@@ -430,6 +484,16 @@ def main():
         and in_region(entry, region_name)
     ]
 
+    skipped = regionless_rows(
+        migration_catalog, deployment_catalog, authenticated_identities,
+        region_name)
+    for entry in skipped:
+        print(
+            f"skipping {entry.get('vm_name', '<unknown>')} "
+            f"{entry.get('clone_name') or entry.get('openstack_server_id') or '<unknown>'}: "
+            "no openstack_region recorded, so it is not checked or removed "
+            f"from region {region_name}"
+        )
     for entry, missing in stale_migrations:
         print(describe_migration(entry, missing))
     for entry, missing_server, missing_volumes, orphan_ports in stale_deployments:

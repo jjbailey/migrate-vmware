@@ -1,0 +1,134 @@
+---
+# playbooks/migrate-openstack-vm-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Migrates one vSphere VM to OpenStack by streaming its disks straight from the
+# datastore, with no clone and no OVF export. By default the disks are read
+# through VixDiskLib (nbdkit's vddk plugin); without that library the flat
+# disk files are read from vCenter's /folder endpoint (nbdkit's curl plugin). A
+# snapshot freezes the source disks and stays in place as the resume checkpoint
+# until every disk is in Glance. Counterpart of migrate-openstack-vm.yml, which
+# is untouched; see doc/datastore-direct.md.
+
+- name: Migrate a vSphere VM to OpenStack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - vars/migration-common.yml
+
+  vars:
+    migration_target: openstack
+    export_format: datastore
+    qemu_img_bin: qemu-img
+    openstack_boot_mode: uefi
+    resume_run_id: ""
+    # Discard a failed run instead of resuming it: removes its retained
+    # snapshot, its run directory, and any images it uploaded. Nothing else runs.
+    discard_run_id: ""
+    artifact_root: "/var/tmp/migrate-vmware"
+    openstack_import_poll_retries: 240
+    openstack_import_poll_delay: 15
+    # Extra qemu-img convert arguments. -m keeps several coroutines in flight
+    # and -W lets them write out of order, which a default single-threaded
+    # conversion cannot do. Cache-mode flags such as "-T none" are deliberately
+    # absent: O_DIRECT is not available on every filesystem.
+    openstack_convert_args: ["-m", "16", "-W"]
+    # Compress the QCOW2 as it is written (qemu-img convert -c): a smaller
+    # staging file and upload for more CPU. Worth it on a slow upload link.
+    openstack_convert_compress: false
+    # Conversions run in the background so they can overlap the previous disk's
+    # upload; these bound how long one may take.
+    openstack_convert_async_timeout: 86400
+    openstack_convert_poll_retries: 2880
+    openstack_convert_poll_delay: 30
+    # Datastore-direct settings.
+    openstack_vddk_nbdkit_bin: nbdkit
+    # How disks are read: vddk (VixDiskLib through nbdkit's vddk plugin), curl
+    # (flat files from vCenter's /folder endpoint), or auto (vddk when the
+    # plugin and library load, else curl).
+    openstack_vddk_backend: auto
+    # VixDiskLib directory holding lib64/libvixDiskLib.so.8; empty uses the
+    # vddk plugin's built-in default.
+    openstack_vddk_libdir: ""
+    # VixDiskLib transports to try, colon-separated.
+    openstack_vddk_transports: nbdssl
+    # vCenter certificate SHA-1 thumbprint; empty reads it in preflight.
+    openstack_vddk_thumbprint: ""
+    # PEM file of the CA that issued the vCenter certificate, for a vCenter this
+    # host does not already trust: curl gets it as cainfo=, and the thumbprint
+    # check verifies against it. Empty uses the host's trust store.
+    openstack_vddk_ca_bundle: ""
+    # A full copy of a snapshot does not need Changed Block Tracking. Set true
+    # to insist on it (a baseline for future incremental runs).
+    openstack_vddk_require_cbt: false
+    # Read a local file instead of connecting to vCenter. Test use only.
+    openstack_vddk_local: false
+
+  tasks:
+    - name: Refuse a discard combined with a resume
+      ansible.builtin.assert:
+        that: not (discard_run_id | length > 0 and resume_run_id | length > 0)
+        fail_msg: Pass either -e resume_run_id or -e discard_run_id, not both.
+
+    - name: Turn a discard request into a cleanup-only resume of that run
+      ansible.builtin.set_fact:
+        resume_run_id: "{{ discard_run_id }}"
+        discard_failed_artifacts: true
+        migration_discard_only: true
+      when: discard_run_id | length > 0
+
+    - name: Record that this is a normal run
+      ansible.builtin.set_fact:
+        migration_discard_only: false
+      when: discard_run_id | length == 0
+
+    - name: Run shared VMware preflight checks
+      ansible.builtin.import_tasks: tasks/migration/common/preflight-vddk.yml
+
+    - name: Run OpenStack preflight checks
+      ansible.builtin.import_tasks: tasks/migration/openstack/preflight-vddk.yml
+
+    - name: Initialize the OpenStack migration
+      ansible.builtin.import_tasks: tasks/migration/openstack/initialize-vddk.yml
+
+    - name: Stop disk streams a killed earlier attempt of this run left running
+      ansible.builtin.import_tasks: tasks/migration/openstack/stop-streams-vddk.yml
+      when: migration_resume_mode | bool
+
+    - name: Execute the OpenStack migration
+      block:
+        - name: Validate requested resume artifacts
+          ansible.builtin.import_tasks: tasks/migration/common/resume-vddk.yml
+
+        - name: Snapshot the source VM and inspect its disks
+          ansible.builtin.import_tasks: tasks/migration/common/prepare-source-manifest.yml
+          when: not (migration_resume_mode | bool)
+
+        - name: Prepare OpenStack disk artifacts
+          ansible.builtin.import_tasks: tasks/migration/openstack/prepare-disks.yml
+          when: not (migration_discard_only | bool)
+
+        - name: Import disks into OpenStack
+          ansible.builtin.import_tasks: tasks/migration/openstack/import-vddk.yml
+          when: not (migration_discard_only | bool)
+
+        - name: Build the OpenStack catalog entry
+          ansible.builtin.import_tasks: tasks/migration/openstack/build-catalog-entry.yml
+          when: not (migration_discard_only | bool)
+
+        - name: Append the migration catalog entry
+          ansible.builtin.import_tasks: tasks/migration/common/append-catalog.yml
+          when: not (migration_discard_only | bool)
+
+      always:
+        - name: Stop disk streams still running after a failure
+          ansible.builtin.import_tasks: tasks/migration/openstack/stop-streams-vddk.yml
+
+        - name: Clean up OpenStack resources
+          ansible.builtin.import_tasks: tasks/migration/openstack/cleanup.yml
+
+        - name: Clean up shared migration resources
+          ansible.builtin.import_tasks: tasks/migration/common/cleanup-vddk.yml
+

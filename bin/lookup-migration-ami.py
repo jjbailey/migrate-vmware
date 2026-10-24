@@ -20,21 +20,32 @@ def project(entry):
         "aws_account_id": entry.get("aws_account_id", ""),
     }
 
-def account_filter(args):
+def account_filter(args, legacy=False):
+    """Rows recorded for --project's account, or with legacy, rows with none.
+
+    Rows written before aws_account_id existed could be from any account, so
+    they are only a fallback when no row names the account (see main below).
+    """
     if not args.project:
         return None
     wanted = str(args.project)
-    return lambda entry: (not entry.get("aws_account_id")
-                          or str(entry["aws_account_id"]) == wanted
+    if legacy:
+        return lambda entry: not entry.get("aws_account_id")
+    return lambda entry: (str(entry.get("aws_account_id") or "") == wanted
                           or entry.get("aws_project") == wanted)
 
-def region_filter(args):
-    account = account_filter(args)
+def region_filter(args, legacy=False):
+    account = account_filter(args, legacy)
     if not args.region:
         return account
     wanted = args.region.strip()
     return lambda entry: (entry.get("aws_region") == wanted
                           and (account is None or account(entry)))
+
+def legacy_region_filter(args):
+    if not args.project:
+        return None
+    return region_filter(args, legacy=True)
 
 if __name__ == "__main__":
     main(
@@ -43,4 +54,5 @@ if __name__ == "__main__":
         project,
         parser_options={"with_status": True, "with_project": True, "with_region": True},
         entry_filter=region_filter,
+        fallback_filter=legacy_region_filter,
     )

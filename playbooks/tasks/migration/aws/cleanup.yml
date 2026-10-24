@@ -14,6 +14,32 @@
     - aws_import_cleanup_required | default(false) | bool
   failed_when: false
 
+# AWS runs do not resume, so an AMI from a run that failed after its import
+# (see import.yml) is never cataloged; it is removed with its snapshots.
+- name: Deregister the AMI of a failed run and delete its snapshots
+  amazon.aws.ec2_ami:
+    image_id: "{{ aws_imported_ami_id }}"
+    state: absent
+    delete_snapshot: true
+    region: "{{ aws_region }}"
+  register: aws_ami_cleanup
+  when:
+    - aws_imported_ami_id | default('') | length > 0
+    - not (migration_succeeded | default(false) | bool)
+  # ignore_errors, not failed_when: false, so .failed survives for the report.
+  ignore_errors: true
+
+- name: Report an AMI that could not be removed
+  ansible.builtin.debug:
+    msg: >-
+      Could not deregister {{ aws_imported_ami_id }} or delete its snapshots
+      in {{ aws_region }}: {{ aws_ami_cleanup.msg | default('no detail') }}.
+      Remove them by hand; no catalog row refers to them.
+  when:
+    - aws_ami_cleanup is defined
+    - aws_ami_cleanup is not skipped
+    - aws_ami_cleanup.failed | default(false) | bool
+
 - name: Remove the staged OVA from S3
   amazon.aws.s3_object:
     bucket: "{{ s3_bucket }}"

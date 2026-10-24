@@ -260,7 +260,7 @@ class CatalogRemovalTests(unittest.TestCase):
              "status": "retired"},
         ]
 
-    def test_retired_row_without_identity_removes_nothing(self):
+    def test_retired_row_without_identity_removes_only_itself(self):
         path = self.write(self.rows())
         try:
             retired = [{"vm_name": "retire-me", "target_platform": "aws",
@@ -277,13 +277,36 @@ class CatalogRemovalTests(unittest.TestCase):
             path.with_name(path.name + ".lock").unlink(missing_ok=True)
 
     def test_removals_never_exceed_the_rows_requested(self):
-        path = self.write(self.rows())
+        # The requested row has look-alikes that share its vm_name, its
+        # import_task_id, or both, but differ elsewhere. Only the exact row
+        # may go, so the count removed equals the count requested.
+        target = {"vm_name": "retire-me", "target_platform": "aws",
+                  "status": "retired", "import_task_id": "import-ami-222",
+                  "aws_region": "us-west-2"}
+        lookalikes = [
+            dict(target, aws_region="us-east-1"),
+            dict(target, vm_name="other-vm"),
+            dict(target, status="completed"),
+        ]
+        rows = self.rows() + [target] + lookalikes
+        path = self.write(rows)
         try:
-            retired = [{"vm_name": "retire-me", "target_platform": "aws",
-                        "status": "retired", "import_task_id": "import-ami-999"}]
             removed = catalog_common.remove_migration_entries(
-                path, [], retired, "aws", "import_task_id", None)
-            self.assertLessEqual(removed, len(retired))
+                path, [], [dict(target)], "aws", "import_task_id", None)
+            remaining = json.loads(path.read_text())["migrations"]
+            self.assertEqual(removed, 1)
+            self.assertEqual(len(remaining), len(rows) - 1)
+            self.assertNotIn(target, remaining)
+            for row in lookalikes:
+                self.assertIn(row, remaining)
+
+            # A requested row that is no longer present removes nothing and
+            # leaves the file alone.
+            before = path.read_text()
+            removed = catalog_common.remove_migration_entries(
+                path, [], [dict(target)], "aws", "import_task_id", None)
+            self.assertEqual(removed, 0)
+            self.assertEqual(path.read_text(), before)
         finally:
             path.unlink(missing_ok=True)
             path.with_name(path.name + ".lock").unlink(missing_ok=True)

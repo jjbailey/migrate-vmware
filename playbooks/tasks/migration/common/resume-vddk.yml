@@ -1,0 +1,153 @@
+---
+# playbooks/tasks/migration/common/resume-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Validate what a datastore-direct resume needs. There is no local VMDK set;
+# the migration snapshot on the source VM is the checkpoint, so a resume needs
+# the saved manifest and that snapshot still present. Disks already in Glance
+# are skipped by openstack/check-image.yml as usual.
+#
+# A discard (migration_discard_only, from -e discard_run_id=<id>) runs the same
+# lookups but tolerates a missing manifest or snapshot: it only collects what
+# the retained run left behind so cleanup can remove it.
+
+- name: Check the resumable manifest
+  ansible.builtin.stat:
+    path: "{{ artifact_manifest_path }}"
+  register: resume_manifest_stat
+  when: migration_resume_mode | bool
+
+- name: Fail if the resumable manifest is missing
+  ansible.builtin.fail:
+    msg: >-
+      Resume run {{ migration_run_id }} is missing {{ artifact_manifest_path }}.
+      Keep the persistent migration directory or start a new run.
+  when:
+    - migration_resume_mode | bool
+    - not (migration_discard_only | bool)
+    - not resume_manifest_stat.stat.exists
+
+- name: Resolve the source VM inventory path for the resume
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command: >-
+    {{ govc_bin }} find /{{ datacenter }}/vm -type m -name "{{ vm_name }}"
+  register: source_vm_find
+  changed_when: false
+  failed_when: source_vm_find.rc != 0 or (source_vm_find.stdout_lines | length != 1)
+  when: migration_resume_mode | bool
+
+- name: Record the source VM path
+  ansible.builtin.set_fact:
+    source_vm_path: "{{ source_vm_find.stdout | trim }}"
+    source_vm_folder: "{{ source_vm_find.stdout | trim | regex_replace('/[^/]+$', '') }}"
+  when: migration_resume_mode | bool
+
+- name: List the source VM snapshots
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ govc_bin }}"
+      - snapshot.tree
+      - "-vm={{ source_vm_path }}"
+  register: resume_snapshot_tree
+  changed_when: false
+  when: migration_resume_mode | bool
+
+# snapshot.tree prints one snapshot name per line, indented for children; a
+# whole-line match keeps a longer name holding this one from passing for it.
+- name: Find the migration snapshot in the tree
+  ansible.builtin.set_fact:
+    resume_snapshot_present: >-
+      {{ resume_snapshot_tree.stdout_lines
+         | map('trim') | select('equalto', snapshot_name)
+         | list | length > 0 }}
+  when: migration_resume_mode | bool
+
+- name: Fail if the migration snapshot is gone
+  ansible.builtin.fail:
+    msg: >-
+      Resume run {{ migration_run_id }} needs snapshot '{{ snapshot_name }}' on
+      '{{ vm_name }}', but it no longer exists. The frozen disks cannot be
+      re-read; start a new run.
+  when:
+    - migration_resume_mode | bool
+    - not (migration_discard_only | bool)
+    - not (resume_snapshot_present | bool)
+
+- name: Take over the retained snapshot's cleanup
+  ansible.builtin.set_fact:
+    snapshot_cleanup_required: "{{ resume_snapshot_present | bool }}"
+  when: migration_resume_mode | bool
+
+# prepare-source-manifest.yml, which runs these on a fresh run, is skipped on a
+# resume. The VM may have changed since (powered on, or snapshotted), and an
+# older manifest may not record which backend read it, so a curl resume checks
+# the recorded disks again before reading any.
+- name: Run the curl backend's disk checks for the resume
+  ansible.builtin.include_tasks: check-curl-disks-vddk.yml
+  vars:
+    curl_check_disks: "{{ resume_backend_manifest.disks }}"
+  when:
+    - migration_resume_mode | bool
+    - not (migration_discard_only | bool)
+    - openstack_vddk_backend_effective == 'curl'
+
+- name: Find the images the retained run uploaded
+  # Every image of a run is named <prefix>-disk-<N>; a failed run never
+  # reached the catalog, so its images are only known by that name. Listing
+  # them by prefix also finds an upload that failed part way.
+  openstack.cloud.image_info:
+    auth: "{{ openstack_auth }}"
+    region_name: "{{ openstack_region_name }}"
+  register: discard_image_info
+  no_log: true
+  when: migration_discard_only | bool
+
+- name: Queue the retained run's images for removal
+  ansible.builtin.set_fact:
+    openstack_uploaded_image_names: >-
+      {{ discard_image_info.images | map(attribute='name')
+         | select('match', (openstack_image_prefix ~ '-disk-') | regex_escape)
+         | list | unique }}
+  when: migration_discard_only | bool
+
+- name: Read the source VM reference for the resume
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command: >-
+    {{ govc_bin }} vm.info -json "{{ source_vm_path }}"
+  register: source_vm_info
+  changed_when: false
+  no_log: true
+  when:
+    - migration_resume_mode | bool
+    - not (migration_discard_only | bool)
+    - openstack_vddk_backend_effective == 'vddk'
+
+- name: Record the source VM reference for the resume
+  ansible.builtin.set_fact:
+    source_vm_moref: "{{ (source_vm_info.stdout | from_json).virtualMachines[0].Self.value }}"
+  no_log: true
+  when:
+    - migration_resume_mode | bool
+    - not (migration_discard_only | bool)
+    - openstack_vddk_backend_effective == 'vddk'
+
+- name: Resolve the migration snapshot reference for the resume
+  ansible.builtin.include_tasks: snapshot-ref-vddk.yml
+  when:
+    - migration_resume_mode | bool
+    - not (migration_discard_only | bool)
+    - openstack_vddk_backend_effective == 'vddk'
+

@@ -11,6 +11,7 @@ from pathlib import Path
 from catalog_common import read_snapshot, remove_deployment_entries, remove_migration_entries
 
 import google.auth
+import google.auth.exceptions
 from google.auth.transport.requests import AuthorizedSession
 
 COMPUTE_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
@@ -195,5 +196,12 @@ def main():
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (OSError, ValueError, json.JSONDecodeError) as error:
+    except (
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        # Missing, unreadable or expired credentials (DefaultCredentialsError,
+        # RefreshError): one line, not a traceback.
+        google.auth.exceptions.GoogleAuthError,
+    ) as error:
         raise SystemExit(f"reconcile-catalog-gcp: {error}")

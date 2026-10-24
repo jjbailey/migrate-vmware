@@ -77,8 +77,11 @@ playbook-only; pass them with `-e`):
 | `openstack_target_project`                   | `OS_PROJECT_NAME`              |
 
 `OS_NICS_JSON` is a JSON list of `{"net-id": ...}` or `{"net-name": ...}` maps;
-when it is set, `OS_NETWORK` is ignored. `openstack_mac_addresses` requires
+when it is set, `OS_NETWORK` and `OS_NETWORK_ID` are ignored. `openstack_mac_addresses` requires
 `openstack_preserve_mac=true`; the launch fails rather than ignoring the MACs.
+`OS_KEY_NAME` defaults to a keypair named `cloud`, which must already exist
+in the target project; the examples below set it to `my-keypair`. The
+playbook's `openstack_key_name` has no default.
 
 ### 1. DHCP address, random MAC, floating IP (default wrapper shape)
 
@@ -232,15 +235,16 @@ VM_NAME=my-vm \
 
 ### 6. Multi-NIC launches
 
-Provide `openstack_nics` (list of `net-id` or `net-name` maps) **or**
-`openstack_network` / `openstack_network_id`, never both. When preserving MACs
-or fixing IPs, list length must equal the NIC count, in the same order.
+Provide `openstack_nics` (list of `net-id` or `net-name` maps); it takes
+precedence over `openstack_network` / `openstack_network_id`, which are then
+ignored (the launch prints a note), so there is no need to clear the
+`Ext-Net` default. When preserving MACs or fixing IPs, list length must equal
+the NIC count, in the same order.
 
 ```bash
 ./bin/run-playbook.sh playbooks/launch-openstack-instance.yml \
   -e vm_name=my-vm \
   -e openstack_flavor=m1.medium \
-  -e openstack_network='' \
   -e '{"openstack_nics": [{"net-id": "<net-a-uuid>"}, {"net-id": "<net-b-uuid>"}]}' \
   -e openstack_preserve_mac=true \
   -e '{"openstack_mac_addresses": ["00:50:56:aa:bb:01", "00:50:56:aa:bb:02"]}' \
@@ -363,6 +367,49 @@ VM_NAME=my-vm \
 
 ---
 
+## OpenStack Migrate, datastore-direct
+
+No clone and no OVF export: snapshots the running VM and streams its disks from
+the datastore (see [../doc/datastore-direct.md](../doc/datastore-direct.md)). Writes the
+same catalog entry, so the launch examples above apply unchanged.
+
+```bash
+# Wrapper (VixDiskLib when installed, else the curl fallback)
+VM_NAME=my-vm \
+  VSPHERE_TARGET_VCENTER=my-vcenter \
+  OS_PROJECT_NAME=my-project-a \
+  ./bin/migrate-openstack-vm-vddk.sh
+
+# Slow upload link: compress the QCOW2 images
+COMPRESS=true VM_NAME=my-vm ./bin/migrate-openstack-vm-vddk.sh
+
+# Force a backend (vddk fails if VixDiskLib is missing; curl needs flat,
+# unsnapshotted disks)
+BACKEND=vddk VM_NAME=my-vm ./bin/migrate-openstack-vm-vddk.sh
+BACKEND=curl VM_NAME=my-vm ./bin/migrate-openstack-vm-vddk.sh
+
+# Playbook
+./bin/run-playbook.sh playbooks/migrate-openstack-vm-vddk.yml \
+  -e vm_name=my-vm \
+  -e vsphere_target_vcenter=my-vcenter \
+  -e openstack_target_project=my-project-a \
+  -e openstack_convert_compress=true
+
+# Resume a failed run (its snapshot was kept on the source VM)
+./bin/run-playbook.sh playbooks/migrate-openstack-vm-vddk.yml \
+  -e vm_name=my-vm \
+  -e vsphere_target_vcenter=my-vcenter \
+  -e openstack_target_project=my-project-a \
+  -e 'resume_run_id=<migration-run-id>'
+
+# Or give up on it: remove its snapshot, run directory, and uploaded images
+DISCARD_RUN_ID=<migration-run-id> VM_NAME=my-vm \
+  VSPHERE_TARGET_VCENTER=my-vcenter OS_PROJECT_NAME=my-project-a \
+  ./bin/migrate-openstack-vm-vddk.sh
+```
+
+---
+
 ## AWS
 
 ```bash
@@ -390,6 +437,9 @@ VM_NAME=my-vm \
   -e key_name=my-ssh-key \
   -e assign_public_ip=true
 ```
+
+`AWS_KEY_NAME` defaults to an EC2 key pair named `cloud`, which must already
+exist in the region; the playbook's `key_name` has no default.
 
 ---
 

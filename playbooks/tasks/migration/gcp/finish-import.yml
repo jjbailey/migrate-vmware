@@ -61,23 +61,28 @@
           Service-side detail: {{ gcp_import_job_diagnostics.stdout | default('none reported') }}
           To retry, re-run the playbook; stale jobs will be cleaned up automatically.
       when: gcp_import_job_state.stdout.strip() != 'SUCCEEDED'
-
-    - name: Remove the completed M2VM image-import resource
-      ansible.builtin.command:
-        argv:
-          - gcloud
-          - compute
-          - migration
-          - image-imports
-          - delete
-          - "{{ gcp_disk.image }}"
-          - "--location={{ gcp_import_location }}"
-          - "--project={{ gcp_project }}"
-          - --quiet
-      environment: "{{ gcp_gcloud_env }}"
-      changed_when: true
-      failed_when: false
   when: gcp_disk.image not in gcp_reused_image_names
+
+# A reused image's import resource may be left over from the attempt that
+# created it, if that attempt failed while the import was still running; its
+# image existing means the job is done, so it is removed here as well. Absent
+# resources are ignored.
+- name: Remove the completed M2VM image-import resource
+  ansible.builtin.command:
+    argv:
+      - gcloud
+      - compute
+      - migration
+      - image-imports
+      - delete
+      - "{{ gcp_disk.image }}"
+      - "--location={{ gcp_import_location }}"
+      - "--project={{ gcp_project }}"
+      - --quiet
+  environment: "{{ gcp_gcloud_env }}"
+  register: gcp_import_resource_delete
+  changed_when: gcp_import_resource_delete.rc == 0
+  failed_when: false
 
 - name: Retrieve the image selfLink
   ansible.builtin.command:

@@ -8,13 +8,12 @@
 
 set -euo pipefail
 
+# dialog and whiptail both draw on stdout and write the answer on stderr, so
+# dlg() swaps the two to let $(dlg ...) capture the answer.
 if command -v dialog > /dev/null 2>&1 ; then
     DIALOG=(dialog --clear)
-    # dialog draws on stdout and writes the answer on stderr.
-    DIALOG_STDOUT=true
 elif command -v whiptail > /dev/null 2>&1 ; then
     DIALOG=(whiptail --clear)
-    DIALOG_STDOUT=false
 else
     echo "${DIALOG_NAME:-launch-dialog}: install dialog or whiptail" >&2
     exit 1
@@ -45,11 +44,7 @@ fi
 
 dlg()
 {
-    if [ "$DIALOG_STDOUT" = true ] ; then
-        "${DIALOG[@]}" "$@" 3>&1 1>&2 2>&3
-    else
-        "${DIALOG[@]}" "$@"
-    fi
+    "${DIALOG[@]}" "$@" 3>&1 1>&2 2>&3
 }
 
 rows=$(tput lines 2> /dev/null || echo 24)
@@ -71,6 +66,8 @@ height()
     printf %s "$h"
 }
 
+# abort exits the script, so only call it from the top level. A helper that
+# runs inside $(...) returns non-zero instead, and its caller does || abort.
 abort()
 {
     dlg --msgbox "${ACTION_VERB:-Launch} cancelled. Nothing was run." 7 "$COLS" || true
@@ -133,7 +130,7 @@ tristate()
     picked=$(radio "$title" \
         auto "Use the vault's default policy" ON \
         true "Force true" OFF \
-        false "Force false" OFF) || abort
+        false "Force false" OFF) || return 1
     [ "$picked" != auto ] && printf %s "$picked" || printf %s ""
 }
 
@@ -169,14 +166,17 @@ for name,stamp in sorted(best.items(), key=lambda item: when(item[1]), reverse=T
     fi
     choices[2]=ON
     choices+=("_other" "Type a different VM name" OFF)
-    picked=$(dlg --radiolist "Which VM do you want to launch?\n(Newest completed ${label} migration first.)" "$(height 16)" "$COLS" 8 "${choices[@]}") || abort
+    picked=$(dlg --radiolist "Which VM do you want to launch?\n(Newest completed ${label} migration first.)" "$(height 16)" "$COLS" 8 "${choices[@]}") || return 1
     [ "$picked" != _other ] && printf %s "$picked" || input "VM name:" ""
 }
 
 vault_keys()
 {
     local vault=$1 map_name=$2
-    local passfile="${VAULT_PASSWORD_FILE:-$HOME/.ssh/dib-vault-pass}"
+    # Same order as edit-vault.sh: VAULT_PASSWORD_FILE if it names a non-empty
+    # file, else ~/.ssh/dib-vault-pass.
+    local passfile="${VAULT_PASSWORD_FILE:-}"
+    [ -n "$passfile" ] && [ -s "$passfile" ] || passfile="$HOME/.ssh/dib-vault-pass"
     [ -s "$passfile" ] || return 1
     local vault_bin=ansible-vault
     local venv_bin="${DIB7_VENV_BIN:-$HOME/.dib7/bin}"
@@ -207,7 +207,7 @@ choose_target()
     choices[2]=ON
     choices+=("_auto" "Let the playbook pick a single-entry vault" OFF)
     choices+=("_other" "Type a different name" OFF)
-    picked=$(dlg --radiolist "$title" "$(height 16)" "$COLS" 8 "${choices[@]}") || abort
+    picked=$(dlg --radiolist "$title" "$(height 16)" "$COLS" 8 "${choices[@]}") || return 1
     case "$picked" in
         _auto) printf %s "" ;;
         _other) input "$title:" "$current" ;;
