@@ -42,6 +42,30 @@ if not isinstance(parsed, list):
 ' "$name" "$value" || wrapper_error "invalid $name"
 }
 
+# Ansible splits -e "key=value" on whitespace, so "Web Server 01" would arrive
+# as vm_name=Web. These print a one-key JSON object for -e instead, which keeps
+# any value intact: wrapper_var as a string, wrapper_json_var as the parsed
+# JSON (a list stays a list). Use them as: args+=(-e "$(wrapper_var k "$v")")
+wrapper_var()
+{
+    python3 -c '
+import json
+import sys
+
+print(json.dumps({sys.argv[1]: sys.argv[2]}))
+' "$1" "$2"
+}
+
+wrapper_json_var()
+{
+    python3 -c '
+import json
+import sys
+
+print(json.dumps({sys.argv[1]: json.loads(sys.argv[2])}))
+' "$1" "$2"
+}
+
 wrapper_capture_args()
 {
     # shellcheck disable=SC2034

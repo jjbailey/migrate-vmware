@@ -70,6 +70,11 @@ tracked = [path for path in subprocess.run(["git", "ls-files"], capture_output=T
            if Path(path).exists()]
 dirs = {str(parent) + "/" for path in tracked for parent in Path(path).parents if str(parent) != "."}
 basenames = {Path(path).name for path in tracked}
+# The public export ships vaults/ and catalogs/ empty (see
+# local/rsync-to-migrate-vmware.sh), so their files are only checked where
+# they are tracked.
+private_dirs = [d for d in ("vaults/", "catalogs/")
+                if not any(path.startswith(d) and Path(path).name != ".gitignore" for path in tracked)]
 path_ref = re.compile(r"(?<![\w./-])(?:\./)?((?:bin|local|playbooks|tests|doc|examples|catalogs|vaults)/[\w./*-]*)")
 bare_ref = re.compile(r"`([\w.-]+\.(?:sh|py|yml|md))`")
 
@@ -78,7 +83,7 @@ for doc in sorted(path for path in tracked if path.endswith(".md")):
     for number, line in enumerate(Path(doc).read_text(encoding="utf-8").splitlines(), 1):
         refs = [m.group(1).rstrip(".") for m in path_ref.finditer(line)]
         for ref in refs:
-            if ref in ALLOWED or ref in dirs or ref + "/" in dirs or ref in tracked:
+            if ref in ALLOWED or ref.startswith(tuple(private_dirs)) or ref in dirs or ref + "/" in dirs or ref in tracked:
                 continue
             if "*" in ref and fnmatch.filter(tracked, ref):
                 continue
@@ -99,7 +104,11 @@ echo "== vaults =="
 # The playbooks load every credential from these encrypted files; make sure
 # the required ones exist and are actually vault-encrypted (plaintext here
 # would both fail at runtime and risk leaking secrets into VCS).
-for vault in vaults/*.yml ; do
+vault_files=$(git ls-files 'vaults/*.yml')
+if [ -z "$vault_files" ] ; then
+    echo "  skip vaults (none tracked; public checkout)"
+fi
+for vault in $vault_files ; do
     if [ -s "$vault" ] && head -n 1 "$vault" | grep -q '^[$]ANSIBLE_VAULT;' ; then
         echo "  ok   $vault"
     else
@@ -111,7 +120,7 @@ done
 # multi-project schema. Skipped silently when the vault password is missing so
 # the gate still runs on machines without credentials.
 vault_pass="${VAULT_PASSWORD_FILE:-$HOME/.ssh/dib-vault-pass}"
-if [ -s "$vault_pass" ] && command -v ansible-vault > /dev/null 2>&1 ; then
+if [ -n "$vault_files" ] && [ -s "$vault_pass" ] && command -v ansible-vault > /dev/null 2>&1 ; then
     echo "== vault schema =="
     if python3 - "$vault_pass" << 'PYTHON' ; then
 import subprocess
@@ -210,38 +219,74 @@ done < <(find bin local tests -type f -name '*.py' 2> /dev/null)
 echo "== catalogs =="
 # append-migration-catalog.py / append-deployment-catalog.py are the
 # gatekeepers for entry-level validation (required fields, non-empty
-# strings) at write time; this just confirms whatever is on disk is still
-# well-formed enough to append to.
+# strings, disk and image order) at write time. Run every row already on
+# disk back through those same validators, so a hand edit or a row written
+# before a validator was tightened is caught here rather than at launch.
 if python3 - << 'PYTHON' ; then
+import importlib.util
 import json
+import sys
 from pathlib import Path
 
+sys.path.insert(0, "bin")
+
+def validator(filename):
+    spec = importlib.util.spec_from_file_location(filename.replace("-", "_")[:-3], Path("bin") / filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.validate
+
 expected = {
-    "migration-catalog.json": "migrations",
-    "deployment-catalog.json": "deployments",
+    "migration-catalog.json": ("migrations", validator("append-migration-catalog.py")),
+    "deployment-catalog.json": ("deployments", validator("append-deployment-catalog.py")),
 }
+rc = 0
 for path in sorted(Path("catalogs").glob("*.json")) if Path("catalogs").is_dir() else []:
-    list_key = expected.get(path.name)
-    if list_key is None:
+    if path.name not in expected:
         continue
+    list_key, validate = expected[path.name]
     data = json.loads(path.read_text())
     if data.get("schema_version") != 1 or not isinstance(data.get(list_key), list):
         raise SystemExit(f"{path}: expected schema_version 1 and a {list_key} list")
+    for position, entry in enumerate(data[list_key]):
+        try:
+            if not isinstance(entry, dict):
+                raise ValueError("row is not an object")
+            validate(entry)
+        except ValueError as error:
+            name = entry.get("vm_name", "<unknown>") if isinstance(entry, dict) else "<unknown>"
+            print(f"  {path}: {list_key}[{position}] ({name}): {error}", file=sys.stderr)
+            rc = 1
+    print(f"  ok   {path}: {len(data[list_key])} row(s) checked")
+sys.exit(rc)
 PYTHON
-    echo "  ok   catalogs (if present) are well-formed"
+    echo "  ok   catalogs (if present) pass the append validators"
 else
     fail "catalog validation failed"
 fi
 
 echo "== yaml parse =="
 if python3 - << 'PYTHON' ; then
+import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 
+# Tracked files plus untracked ones Git does not ignore, so an ignored
+# .ansible/ collection cache or other local clutter is not parsed. Outside a
+# Git checkout, fall back to a walk that skips hidden directories.
+try:
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        capture_output=True, check=True).stdout.decode().split("\0")
+    candidates = [Path(name) for name in listed if name]
+except (OSError, subprocess.CalledProcessError):
+    candidates = [path for path in Path(".").rglob("*")
+                  if not any(part.startswith(".") for part in path.parts)]
 rc = 0
-for path in sorted([*Path('.').glob('**/*.yml'), *Path('.').glob('**/*.yaml')]):
+for path in sorted(path for path in candidates
+                   if path.suffix in {".yml", ".yaml"} and path.is_file()):
     try:
         yaml.safe_load(path.read_text())
     except Exception as exc:
@@ -255,7 +300,20 @@ else
 fi
 
 echo "== unit tests =="
-if python3 -m unittest discover -s tests -p 'test_*.py' ; then
+# A test that skips (a missing nbdkit, qemu-img or ansible-playbook, say)
+# still lets the run succeed, but say so: "ok" alone would read as though
+# every test ran.
+if python3 - << 'PYTHON' ; then
+import sys
+import unittest
+
+suite = unittest.defaultTestLoader.discover("tests", pattern="test_*.py")
+result = unittest.TextTestRunner().run(suite)
+if result.skipped:
+    reasons = sorted({reason for _, reason in result.skipped})
+    print(f"  WARN {len(result.skipped)} unit test(s) skipped: {'; '.join(reasons)}")
+sys.exit(0 if result.wasSuccessful() else 1)
+PYTHON
     echo "  ok   focused unit tests"
     # After the tests, which re-create bin/ and tests/ caches by importing.
     rm -rf bin/__pycache__ local/__pycache__ tests/__pycache__

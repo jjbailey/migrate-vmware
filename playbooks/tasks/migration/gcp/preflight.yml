@@ -14,11 +14,12 @@
   changed_when: false
 
 - name: Check the Migrate to Virtual Machines image-import command
+  # The same command group start-import.yml and finish-import.yml run.
   ansible.builtin.command:
     argv:
       - gcloud
+      - compute
       - migration
-      - vms
       - image-imports
       - --help
   register: gcp_image_import_command_check

@@ -54,9 +54,11 @@ configure_network_interface()
         return 1
     fi
     grep -qi "BOOTPROTO=dhcp" "$ifconfig_path" && return
-    cp -p -b "$ifconfig_path" "$ifconfig_path.orig"
+    # main() calls this in an || list, where set -e does not apply, so each
+    # step that must stop the rewrite checks its own status.
+    cp -p -b "$ifconfig_path" "$ifconfig_path.orig" || return 1
 
-    cat << EOF > "$ifconfig_path"
+    cat << EOF > "$ifconfig_path" || return 1
 BOOTPROTO=dhcp
 DEVICE=$nic
 ONBOOT=yes
@@ -69,11 +71,16 @@ EOF
 main()
 {
     if is_openstack && is_rhel_like ; then
+        local status=0
         disable_udev_rule
-        configure_network_interface
-        # Disable first so a failed restart cannot leave this running on every
-        # boot; the network settings are already written by this point.
+        configure_network_interface || status=$?
+        # Disable first so neither a missing ifcfg file nor a failed restart
+        # can leave this running on every boot.
         chkconfig stage-v2v.sh off
+        if (( status != 0 )) ; then
+            echo "stage-v2v.sh: networking was not staged; disabled without restarting the network" >&2
+            return "$status"
+        fi
         systemctl restart network
     fi
 }

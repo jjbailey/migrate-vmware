@@ -21,11 +21,11 @@ AWS_INSTANCE_TYPE=${AWS_INSTANCE_TYPE:-}
 wrapper_require_json_array AWS_SECURITY_GROUPS_JSON "$AWS_SECURITY_GROUPS_JSON"
 
 args=()
-[ -n "$VM_NAME" ] && args+=(-e "vm_name=$VM_NAME")
-[ -n "$AWS_TARGET_PROJECT" ] && args+=(-e "aws_target_project=$AWS_TARGET_PROJECT")
-[ -n "$AWS_SUBNET_ID" ] && args+=(-e "vpc_subnet_id=$AWS_SUBNET_ID")
-[ -n "$AWS_SECURITY_GROUPS_JSON" ] && args+=(-e "{\"security_groups\": $AWS_SECURITY_GROUPS_JSON}")
-[ -n "$AWS_KEY_NAME" ] && args+=(-e "key_name=$AWS_KEY_NAME")
-[ -n "$AWS_INSTANCE_TYPE" ] && args+=(-e "instance_type=$AWS_INSTANCE_TYPE")
+[ -n "$VM_NAME" ] && args+=(-e "$(wrapper_var vm_name "$VM_NAME")")
+[ -n "$AWS_TARGET_PROJECT" ] && args+=(-e "$(wrapper_var aws_target_project "$AWS_TARGET_PROJECT")")
+[ -n "$AWS_SUBNET_ID" ] && args+=(-e "$(wrapper_var vpc_subnet_id "$AWS_SUBNET_ID")")
+[ -n "$AWS_SECURITY_GROUPS_JSON" ] && args+=(-e "$(wrapper_json_var security_groups "$AWS_SECURITY_GROUPS_JSON")")
+[ -n "$AWS_KEY_NAME" ] && args+=(-e "$(wrapper_var key_name "$AWS_KEY_NAME")")
+[ -n "$AWS_INSTANCE_TYPE" ] && args+=(-e "$(wrapper_var instance_type "$AWS_INSTANCE_TYPE")")
 
 wrapper_run_playbook playbooks/launch-aws-instance.yml "${args[@]}" "${wrapper_extra_args[@]}" -v

@@ -1,0 +1,40 @@
+---
+# playbooks/tasks/migration/common/snapshot-ref-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Resolve the migration snapshot's managed object reference (snapshot-NNN),
+# which VixDiskLib needs to open the disks as the snapshot froze them. Fails if
+# the snapshot is missing. Expects: source_vm_path, snapshot_name.
+# Output: source_snapshot_moref
+
+- name: List the source VM snapshots with their references
+  environment:
+    GOVC_URL: "{{ govc_url }}"
+    GOVC_USERNAME: "{{ govc_username }}"
+    GOVC_PASSWORD: "{{ govc_password }}"
+    GOVC_INSECURE: "{{ govc_insecure }}"
+  ansible.builtin.command:
+    argv:
+      - "{{ govc_bin }}"
+      - snapshot.tree
+      - "-vm={{ source_vm_path }}"
+      - -i
+  register: snapshot_ref_tree
+  changed_when: false
+
+- name: Record the migration snapshot reference
+  vars:
+    # Lines look like "[snapshot-88802]  <name>", indented for children.
+    snapshot_ref_matches: >-
+      {{ snapshot_ref_tree.stdout_lines
+         | select('search', '[]] +' ~ (snapshot_name | regex_escape) ~ '$')
+         | map('regex_search', 'snapshot-[0-9]+') | list }}
+  ansible.builtin.set_fact:
+    source_snapshot_moref: "{{ snapshot_ref_matches | first | default('') }}"
+
+- name: Fail if the migration snapshot reference is unknown
+  ansible.builtin.assert:
+    that: source_snapshot_moref | length > 0
+    fail_msg: >-
+      Snapshot '{{ snapshot_name }}' was not found on '{{ vm_name }}'.
+

@@ -74,6 +74,15 @@
   retries: "{{ import_poll_retries }}"
   delay: "{{ import_poll_delay }}"
 
+# From here on the AMI and its snapshots exist. Any later failure (the
+# snapshot check, tagging, the catalog) leaves an AMI no catalog row points
+# at, so cleanup.yml deregisters it and deletes its snapshots unless the run
+# succeeds.
+- name: Mark the imported AMI for cleanup on failure
+  ansible.builtin.set_fact:
+    aws_imported_ami_id: "{{ import_status.import_image[0].image_id }}"
+  when: import_status.import_image[0].image_id | default('', true) | length > 0
+
 - name: Display the AWS import result
   ansible.builtin.debug:
     msg: >-

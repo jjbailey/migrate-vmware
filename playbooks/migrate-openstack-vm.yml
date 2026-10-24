@@ -27,7 +27,7 @@
     # and -W lets them write out of order, which a default single-threaded
     # conversion cannot do. Cache-mode flags such as "-T none" are deliberately
     # absent: O_DIRECT is not available on every filesystem.
-    openstack_convert_args: ['-m', '16', '-W']
+    openstack_convert_args: ["-m", "16", "-W"]
     # Conversions run in the background so they can overlap the previous disk's
     # upload; these bound how long one may take.
     openstack_convert_async_timeout: 86400

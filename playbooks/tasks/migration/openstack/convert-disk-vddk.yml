@@ -1,0 +1,129 @@
+---
+# playbooks/tasks/migration/openstack/convert-disk-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Start one disk's stream-and-convert in the background and remember its job
+# ID. The datastore-direct counterpart of convert-disk.yml: instead of reading
+# an exported VMDK, nbdkit serves the source VM's frozen disk over a Unix socket
+# and qemu-img converts that raw stream to QCOW2. The caller decides when to
+# collect the job, which is what lets a conversion overlap the previous disk's
+# upload.
+#
+# Backends (openstack_vddk_backend_effective, chosen in preflight):
+#   vddk  nbdkit's vddk plugin and VixDiskLib open the disk as the migration
+#         snapshot froze it (vCenter login, ticket, NFC to the ESXi host).
+#   curl  nbdkit's curl plugin reads the -flat.vmdk from vCenter's /folder
+#         endpoint with Range requests. A snapshot leaves the base file
+#         untouched, so this too is a point-in-time image.
+#
+# Expects: openstack_convert_disk (a manifest disk entry), the vCenter facts and
+# datacenter (plus source_vm_moref and source_snapshot_moref for vddk), or
+# openstack_vddk_local=true (a local file, for tests).
+
+- name: Write the vCenter password where nbdkit can read it without argv
+  ansible.builtin.copy:
+    content: "{{ vcenter_password }}"
+    dest: "{{ openstack_vddk_socket_dir }}/password"
+    mode: "0600"
+  when: not (openstack_vddk_local | bool)
+  no_log: true
+
+- name: Assemble the nbdkit plugin and arguments for this disk
+  vars:
+    # "[datastore] dir/disk.vmdk" is served as dir/disk-flat.vmdk.
+    openstack_vddk_datastore: "{{ openstack_convert_disk.path | regex_replace('^\\[([^\\]]+)\\].*$', '\\1') }}"
+    openstack_vddk_relative: "{{ openstack_convert_disk.path | regex_replace('^\\[[^\\]]+\\]\\s*(.*)\\.vmdk$', '\\1') }}-flat.vmdk"
+    openstack_vddk_password_arg: "password=+{{ openstack_vddk_socket_dir }}/password"
+    openstack_vddk_args_vddk: >-
+      {{ (['libdir=' ~ openstack_vddk_libdir] if (openstack_vddk_libdir | length > 0) else [])
+         + ['server=' ~ vcenter_hostname,
+            'user=' ~ vcenter_username,
+            openstack_vddk_password_arg,
+            'thumbprint=' ~ openstack_vddk_thumbprint,
+            'vm=moref=' ~ (source_vm_moref | default('')),
+            'snapshot=' ~ (source_snapshot_moref | default('')),
+            'transports=' ~ openstack_vddk_transports,
+            'file=' ~ openstack_convert_disk.path] }}
+    openstack_vddk_args_curl: >-
+      {{ ['url=https://' ~ vcenter_hostname ~ '/folder/' ~ (openstack_vddk_relative | urlencode)
+            ~ '?dcPath=' ~ (datacenter | urlencode) ~ '&dsName=' ~ (openstack_vddk_datastore | urlencode),
+          'user=' ~ vcenter_username,
+          openstack_vddk_password_arg,
+          'sslverify=' ~ ('true' if (validate_certs | bool) else 'false')]
+         + (['cainfo=' ~ openstack_vddk_ca_bundle] if (openstack_vddk_ca_bundle | length > 0) else []) }}
+  ansible.builtin.set_fact:
+    openstack_vddk_plugin: >-
+      {{ 'file' if (openstack_vddk_local | bool) else openstack_vddk_backend_effective }}
+    openstack_vddk_plugin_args: >-
+      {{ ['file=' ~ openstack_convert_disk.path] if (openstack_vddk_local | bool)
+         else (openstack_vddk_args_vddk if openstack_vddk_backend_effective == 'vddk'
+               else openstack_vddk_args_curl) }}
+  no_log: true
+
+- name: Start this disk's stream and QCOW2 conversion atomically
+  # nbdkit -r keeps the export read-only. -f keeps it in the foreground,
+  # backgrounded by this shell: a forked nbdkit drops its stderr and logs to
+  # syslog, so why a read failed (certificate, URL, login) would never reach
+  # the conversion's failure message. Its log is kept in the run directory,
+  # and it writes the pidfile once the socket is listening. The EXIT trap
+  # stops it. The temporary name plus the final mv means an interrupted run
+  # never leaves a short qcow2 that looks complete; -m/-W let qemu-img keep
+  # several coroutines in flight, as in convert-disk.yml; -c
+  # (openstack_convert_compress) compresses clusters in the same single pass.
+  # A compressed conversion reads the source one cluster at a time, and each
+  # read becomes a /folder request with about half a second of vCenter
+  # overhead, so with the default 64 KiB clusters it crawled at ~1.3 MiB/s;
+  # 2 MiB clusters measured ~26 MiB/s against ~32 MiB/s uncompressed.
+  vars:
+    # A list; a string from a bare -e key=value is read as a YAML list when it
+    # looks like one, else split on whitespace.
+    openstack_convert_argv: >-
+      {{ openstack_convert_args if (openstack_convert_args is not string)
+         else ((openstack_convert_args | from_yaml) if (openstack_convert_args | trim).startswith('[')
+               else openstack_convert_args.split()) }}
+  # Every value is shell-quoted: run directories and disk paths come from
+  # operator settings and can hold spaces.
+  ansible.builtin.shell: |
+    set -eu
+    socket={{ (openstack_vddk_socket_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.sock') | quote }}
+    pidfile={{ (openstack_vddk_socket_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.pid') | quote }}
+    log={{ (migration_run_dir ~ '/nbdkit-disk-' ~ openstack_convert_disk.index ~ '.log') | quote }}
+    temporary={{ (openstack_staging_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.qcow2.tmp') | quote }}
+    rm -f "$socket" "$pidfile" "$temporary"
+    {{ openstack_vddk_nbdkit_bin | quote }} -f -r -U "$socket" --pidfile "$pidfile" \
+      {{ openstack_vddk_plugin | quote }} {{ openstack_vddk_plugin_args | map('quote') | join(' ') }} \
+      2> "$log" &
+    nbdkit_pid=$!
+    trap 'kill "$nbdkit_pid" 2> /dev/null || true' EXIT
+    waited=0
+    until [ -s "$pidfile" ] ; do
+      if ! kill -0 "$nbdkit_pid" 2> /dev/null ; then
+        echo "nbdkit exited before serving $socket: $(cat "$log")" >&2
+        exit 1
+      fi
+      if [ "$waited" -ge 600 ] ; then
+        echo "nbdkit did not serve $socket within 60s: $(cat "$log")" >&2
+        exit 1
+      fi
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if ! {{ qemu_img_bin | quote }} convert {{ openstack_convert_argv | map('string') | map('quote') | join(' ') }} \
+      {{ '-c -o cluster_size=2M' if (openstack_convert_compress | bool) else '' }} \
+      -f raw -O qcow2 "nbd+unix:///?socket=$socket" "$temporary" ; then
+      echo "nbdkit log ($log): $(cat "$log")" >&2
+      exit 1
+    fi
+    mv -f "$temporary" {{ (openstack_staging_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.qcow2') | quote }}
+  async: "{{ openstack_convert_async_timeout | int }}"
+  poll: 0
+  register: openstack_convert_started
+  changed_when: true
+  no_log: true
+
+- name: Remember this disk's conversion job
+  ansible.builtin.set_fact:
+    openstack_convert_jobs: >-
+      {{ openstack_convert_jobs
+         | combine({openstack_convert_disk.index | string: openstack_convert_started.ansible_job_id}) }}
+

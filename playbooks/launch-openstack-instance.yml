@@ -92,6 +92,24 @@
           so the MACs would be ignored. Set openstack_preserve_mac=true
           (OS_PRESERVE_MAC=true) or drop the MAC list.
 
+    # openstack_network defaults to Ext-Net, so a caller passing only
+    # openstack_nics would otherwise have to clear it too. Custom NICs take
+    # precedence: the single-network inputs are then ignored and not looked up.
+    # Recorded now, because os.nics is rewritten to port IDs further down.
+    - name: Record whether custom NICs replace the single network
+      ansible.builtin.set_fact:
+        openstack_custom_nics: "{{ os.nics | length > 0 }}"
+
+    - name: Note that custom NICs override the single network
+      ansible.builtin.debug:
+        msg: >-
+          openstack_nics is set, so openstack_network
+          {{ openstack_network | tojson }}{{ (' and openstack_network_id ' ~ (openstack_network_id | tojson))
+          if (openstack_network_id | length > 0) else '' }} are ignored.
+      when:
+        - openstack_custom_nics | bool
+        - (openstack_network | length > 0) or (openstack_network_id | length > 0)
+
     - name: Resolve custom NIC network names
       openstack.cloud.networks_info:
         auth: "{{ openstack_auth }}"
@@ -145,6 +163,14 @@
         os: "{{ os | combine({'nics': openstack_nics_with_ids | map('dict2items') | map('rejectattr', 'key', 'equalto', 'net-name') | map('items2dict') | list}) }}"
       when: os.nics | length > 0
 
+    # The catalog needs a network identity; with custom NICs the single-network
+    # fields are recorded empty, so record the NICs' networks instead.
+    - name: Record the networks the custom NICs use
+      ansible.builtin.set_fact:
+        openstack_custom_nic_network_ids: >-
+          {{ os.nics | selectattr('net-id', 'defined') | map(attribute='net-id') | list }}
+      when: openstack_custom_nics | bool
+
     - name: Require only one security-group input form
       ansible.builtin.assert:
         that:
@@ -160,6 +186,7 @@
         name: "{{ openstack_network }}"
       register: openstack_network_lookup
       when:
+        - not (openstack_custom_nics | bool)
         - openstack_network_id | length == 0
         - openstack_network | length > 0
       no_log: true
@@ -174,6 +201,7 @@
           openstack_network_id explicitly. Candidate IDs:
           {{ openstack_network_lookup.networks | map(attribute='id') | list | join(', ') }}
       when:
+        - not (openstack_custom_nics | bool)
         - openstack_network_id | length == 0
         - openstack_network | length > 0
 
@@ -181,6 +209,7 @@
       ansible.builtin.set_fact:
         openstack_network_id: "{{ openstack_network_lookup.networks[0].id }}"
       when:
+        - not (openstack_custom_nics | bool)
         - openstack_network_id | length == 0
         - openstack_network | length > 0
 
@@ -304,12 +333,11 @@
         that:
           - os.image_ids | length > 0
           - openstack_flavor | length > 0
-          - (openstack_network | length > 0) or (os.nics | length > 0)
-          - not ((openstack_network | length > 0) and (os.nics | length > 0))
+          - (openstack_network | length > 0) or (openstack_network_id | length > 0) or (os.nics | length > 0)
           - (os.image_ids | length == 1) or (source_artifact_manifest is defined)
         fail_msg: >-
-          Provide openstack_flavor and exactly one of openstack_network or
-          openstack_nics. Multi-disk manual image selection also requires
+          Provide openstack_flavor and openstack_network, openstack_network_id,
+          or openstack_nics (which takes precedence). Multi-disk manual image selection also requires
           source_artifact_manifest with a capacity_bytes value for every disk.
 
     - name: Require the image list to match the source disk manifest
@@ -357,35 +385,6 @@
         - openstack_user_data | length == 0
       ansible.builtin.set_fact:
         openstack_user_data: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/../examples/openstack-dhcp-user-data.yaml') }}"
-
-    - name: Create Cinder volumes for additional migrated disks
-      openstack.cloud.volume:
-        auth: "{{ openstack_auth }}"
-        region_name: "{{ openstack_region_name }}"
-        name: "{{ instance_name }}-data-disk-{{ disk_index + 1 }}-{{ openstack_launch_id }}"
-        image: "{{ item }}"
-        size: "{{ ((source_artifact_manifest.disks[disk_index + 1].capacity_bytes / 1073741824) | round(0, 'ceil')) | int }}"
-        availability_zone: "{{ openstack_availability_zone if openstack_availability_zone | length > 0 else omit }}"
-        volume_type: "{{ openstack_volume_type if openstack_volume_type | length > 0 else omit }}"
-        state: present
-        wait: true
-        timeout: 3600
-      loop: "{{ os.image_ids[1:] }}"
-      loop_control:
-        index_var: disk_index
-        label: "data disk {{ disk_index + 1 }}"
-      register: data_volume_results
-      no_log: true
-
-    - name: Collect data volume IDs
-      ansible.builtin.set_fact:
-        data_volume_ids: "{{ data_volume_ids | default([]) + [item.volume.id] }}"
-        data_volume_created_ids: >-
-          {{ data_volume_created_ids | default([])
-             + ([item.volume.id] if (item.changed | default(false) | bool and item.volume is defined) else []) }}
-      loop: "{{ data_volume_results.results | default([]) }}"
-      loop_control:
-        label: "{{ item.volume.id | default('unknown') }}"
 
     - name: Select explicit network identity inputs
       ansible.builtin.set_fact:
@@ -483,8 +482,63 @@
       when: >-
         (openstack_preserve_mac | bool) or (os.fixed_ips | length > 0)
 
-    - name: Create OpenStack ports with requested network identity
+    # openstack.cloud.server treats an existing server of the same name as
+    # already created and returns it, so the data volumes and ports made below
+    # for a new server would be left unattached. Refuse before creating any.
+    - name: Look up servers that already use the instance name
+      openstack.cloud.server_info:
+        auth: "{{ openstack_auth }}"
+        region_name: "{{ openstack_region_name }}"
+        name: "{{ instance_name }}"
+      register: openstack_existing_servers
+      no_log: true
+
+    - name: Refuse to launch over an existing server of the same name
+      vars:
+        openstack_existing_server_ids: >-
+          {{ openstack_existing_servers.servers | default([])
+             | selectattr('name', 'equalto', instance_name)
+             | map(attribute='id') | list }}
+      ansible.builtin.fail:
+        msg: >-
+          OpenStack project '{{ openstack_target_project_name }}' already has a
+          server named '{{ instance_name }}' ({{ openstack_existing_server_ids | join(', ') }}).
+          Launching again would return that server and leave this run's new
+          data volumes and ports unattached. Pass a different -e instance_name,
+          or delete the existing server first.
+      when: openstack_existing_server_ids | length > 0
+
+    # Everything that creates a cloud resource is in this one block, so a
+    # failure at any step (a data volume part way through the list, a port, the
+    # server itself) is cleaned up by the rescue below.
+    - name: Create the data volumes, ports, and server
       block:
+        - name: Create Cinder volumes for additional migrated disks
+          openstack.cloud.volume:
+            auth: "{{ openstack_auth }}"
+            region_name: "{{ openstack_region_name }}"
+            name: "{{ instance_name }}-data-disk-{{ disk_index + 1 }}-{{ openstack_launch_id }}"
+            image: "{{ item }}"
+            size: "{{ ((source_artifact_manifest.disks[disk_index + 1].capacity_bytes / 1073741824) | round(0, 'ceil')) | int }}"
+            availability_zone: "{{ openstack_availability_zone if openstack_availability_zone | length > 0 else omit }}"
+            volume_type: "{{ openstack_volume_type if openstack_volume_type | length > 0 else omit }}"
+            state: present
+            wait: true
+            timeout: 3600
+          loop: "{{ os.image_ids[1:] }}"
+          loop_control:
+            index_var: disk_index
+            label: "data disk {{ disk_index + 1 }}"
+          register: data_volume_results
+          no_log: true
+
+        - name: Collect data volume IDs
+          ansible.builtin.set_fact:
+            data_volume_ids: "{{ data_volume_ids | default([]) + [item.volume.id] }}"
+          loop: "{{ data_volume_results.results | default([]) }}"
+          loop_control:
+            label: "{{ item.volume.id | default('unknown') }}"
+
         - name: Create requested network-identity port
           openstack.cloud.port:
             auth: "{{ openstack_auth }}"
@@ -511,57 +565,22 @@
           when: >-
             (openstack_preserve_mac | bool) or (os.fixed_ips | length > 0)
 
-      rescue:
-        - name: Remove newly created ports after port creation failure
-          openstack.cloud.port:
-            auth: "{{ openstack_auth }}"
-            region_name: "{{ openstack_region_name }}"
-            name: "{{ item.port.name }}"
-            state: absent
+        - name: Build NIC definitions from requested network-identity ports
+          ansible.builtin.set_fact:
+            openstack_preserved_nics: >-
+              {{ openstack_preserved_nics | default([]) + [{'port-id': item.port.id}] }}
           loop: "{{ openstack_requested_port_results.results | default([]) }}"
           loop_control:
-            label: "port {{ item.port.id | default('unknown') }}"
-          when:
-            - item.changed | default(false) | bool
-            - item.port is defined
-          failed_when: false
+            label: "NIC {{ item.item }}"
+          when: >-
+            (openstack_preserve_mac | bool) or (os.fixed_ips | length > 0)
 
-        - name: Remove newly created data volumes after port creation failure
-          openstack.cloud.volume:
-            auth: "{{ openstack_auth }}"
-            region_name: "{{ openstack_region_name }}"
-            name: "{{ item }}"
-            state: absent
-          loop: "{{ data_volume_created_ids | default([]) }}"
-          loop_control:
-            label: "volume {{ item }}"
-          failed_when: false
+        - name: Use requested network-identity ports for the server launch
+          ansible.builtin.set_fact:
+            os: "{{ os | combine({'nics': openstack_preserved_nics}) }}"
+          when: >-
+            (openstack_preserve_mac | bool) or (os.fixed_ips | length > 0)
 
-        - name: Report the port creation failure
-          ansible.builtin.fail:
-            msg: >-
-              Creating the requested OpenStack network-identity ports failed.
-              Newly created ports and data volumes from this attempt were
-              removed where possible.
-
-    - name: Build NIC definitions from requested network-identity ports
-      ansible.builtin.set_fact:
-        openstack_preserved_nics: >-
-          {{ openstack_preserved_nics | default([]) + [{'port-id': item.port.id}] }}
-      loop: "{{ openstack_requested_port_results.results | default([]) }}"
-      loop_control:
-        label: "NIC {{ item.item }}"
-      when: >-
-        (openstack_preserve_mac | bool) or (os.fixed_ips | length > 0)
-
-    - name: Use requested network-identity ports for the server launch
-      ansible.builtin.set_fact:
-        os: "{{ os | combine({'nics': openstack_preserved_nics}) }}"
-      when: >-
-        (openstack_preserve_mac | bool) or (os.fixed_ips | length > 0)
-
-    - name: Launch the OpenStack server
-      block:
         - name: Create the OpenStack server
           openstack.cloud.server:
             auth: "{{ openstack_auth }}"
@@ -585,7 +604,39 @@
           register: launch_result
 
       rescue:
-        - name: Remove newly created ports after server launch failure
+        # The pre-launch check found no server with this name, so one found now
+        # was created by this attempt. It is deleted first and waited for:
+        # its attached volumes stay in-use, and cannot be deleted, until it is gone.
+        - name: Look up a server this failed launch created
+          openstack.cloud.server_info:
+            auth: "{{ openstack_auth }}"
+            region_name: "{{ openstack_region_name }}"
+            name: "{{ instance_name }}"
+          register: openstack_failed_servers
+          failed_when: false
+          no_log: true
+
+        - name: Remove the server after launch failure
+          openstack.cloud.server:
+            auth: "{{ openstack_auth }}"
+            region_name: "{{ openstack_region_name }}"
+            name: "{{ item.id }}"
+            state: absent
+            delete_ips: "{{ openstack_auto_ip | bool }}"
+            wait: true
+            timeout: 600
+          loop: >-
+            {{ openstack_failed_servers.servers | default([])
+               | selectattr('name', 'equalto', instance_name) | list }}
+          loop_control:
+            label: "server {{ item.id }}"
+          register: openstack_failed_server_removal
+          # ignore_errors, not failed_when: false, so each result keeps
+          # .failed for the cleanup count in the report below.
+          ignore_errors: true
+          no_log: true
+
+        - name: Remove newly created ports after launch failure
           openstack.cloud.port:
             auth: "{{ openstack_auth }}"
             region_name: "{{ openstack_region_name }}"
@@ -597,25 +648,45 @@
           when:
             - item.changed | default(false) | bool
             - item.port is defined
-          failed_when: false
+          register: openstack_failed_port_removal
+          ignore_errors: true
 
-        - name: Remove newly created data volumes after server launch failure
+        # A volume whose creation failed part way may exist without its ID
+        # being returned, so it is removed by its (launch-unique) name.
+        - name: Remove newly created data volumes after launch failure
           openstack.cloud.volume:
             auth: "{{ openstack_auth }}"
             region_name: "{{ openstack_region_name }}"
-            name: "{{ item }}"
+            name: >-
+              {{ item.volume.id
+                 if ((item.changed | default(false) | bool) and item.volume is defined)
+                 else (instance_name ~ '-data-disk-' ~ ((item.disk_index | int) + 1) ~ '-' ~ openstack_launch_id) }}
             state: absent
-          loop: "{{ data_volume_created_ids | default([]) }}"
+          loop: "{{ data_volume_results.results | default([]) }}"
           loop_control:
-            label: "volume {{ item }}"
-          failed_when: false
+            label: "data disk {{ (item.disk_index | default(0) | int) + 1 }}"
+          when: >-
+            (item.changed | default(false) | bool and item.volume is defined)
+            or (item.failed | default(false) | bool)
+          register: openstack_failed_volume_removal
+          ignore_errors: true
 
-        - name: Report the server launch failure
+        - name: Report the launch failure
+          vars:
+            openstack_cleanup_failures: >-
+              {{ ((openstack_failed_server_removal.results | default([]))
+                  + (openstack_failed_port_removal.results | default([]))
+                  + (openstack_failed_volume_removal.results | default([])))
+                 | selectattr('failed', 'defined') | selectattr('failed') | list | length }}
           ansible.builtin.fail:
             msg: >-
-              OpenStack server launch failed. Newly created network-identity
-              ports and data volumes from this attempt were removed where
-              possible.
+              OpenStack launch of '{{ instance_name }}' failed. The server, ports,
+              and data volumes this attempt created were removed{{
+              '' if (openstack_cleanup_failures | int == 0)
+              else (', except ' ~ openstack_cleanup_failures ~ ' that could not be: check for leftovers named '
+                    ~ instance_name ~ '-*-' ~ openstack_launch_id) }}.
+              Failed task: {{ ansible_failed_task.name | default('unknown') }}:
+              {{ ansible_failed_result.msg | default('no message') }}
 
     - name: Show the launched OpenStack server
       ansible.builtin.debug:
@@ -631,9 +702,11 @@
           openstack_project: "{{ openstack_target_project_name }}"
           openstack_project_id: "{{ openstack_auth_project_id }}"
           openstack_flavor: "{{ openstack_flavor }}"
-          openstack_network: "{{ openstack_network }}"
-          openstack_network_id: "{{ openstack_network_id }}"
-          openstack_network_ids: "{{ openstack_requested_network_ids | default([]) }}"
+          openstack_network: "{{ '' if (openstack_custom_nics | bool) else openstack_network }}"
+          openstack_network_id: "{{ '' if (openstack_custom_nics | bool) else openstack_network_id }}"
+          openstack_network_ids: >-
+            {{ openstack_requested_network_ids
+               | default(openstack_custom_nic_network_ids | default([])) }}
           openstack_nics: "{{ os.nics }}"
           openstack_port_ids: >-
             {{ os.nics | selectattr('port-id', 'defined')

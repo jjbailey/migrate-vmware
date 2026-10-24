@@ -58,21 +58,30 @@ def build_parser(with_status=False, with_project=False, with_region=False):
         )
     return parser
 
-def run(tool, platform, project, parser_options=None, entry_filter=None):
+def run(tool, platform, project, parser_options=None, entry_filter=None,
+        fallback_filter=None):
     """Parse arguments, find the newest row, and print the projected fields.
 
     project is a callable turning one catalog row into the JSON object the
-    caller's playbook consumes.
+    caller's playbook consumes. fallback_filter, when it returns a filter, is
+    tried only if entry_filter matches nothing.
     """
     args = build_parser(**(parser_options or {})).parse_args()
-    latest = latest_migration(
-        args.catalog,
-        args.vm_name,
-        platform,
-        status=getattr(args, "status", "completed"),
-        entry_filter=None if entry_filter is None else entry_filter(args),
-        tool=tool,
-    )
+    filters = [entry_filter]
+    if fallback_filter is not None and fallback_filter(args) is not None:
+        filters.append(fallback_filter)
+    latest = None
+    for make_filter in filters:
+        latest = latest_migration(
+            args.catalog,
+            args.vm_name,
+            platform,
+            status=getattr(args, "status", "completed"),
+            entry_filter=None if make_filter is None else make_filter(args),
+            tool=tool,
+        )
+        if latest is not None:
+            break
     if latest is None:
         raise SystemExit(
             f"{tool}: no usable {getattr(args, 'status', 'completed')!r} "
@@ -81,9 +90,11 @@ def run(tool, platform, project, parser_options=None, entry_filter=None):
         )
     print(json.dumps(project(latest)))
 
-def main(tool, platform, project, parser_options=None, entry_filter=None):
+def main(tool, platform, project, parser_options=None, entry_filter=None,
+         fallback_filter=None):
     """Entry point wrapper turning expected failures into a clean exit."""
     try:
-        run(tool, platform, project, parser_options, entry_filter)
+        run(tool, platform, project, parser_options, entry_filter,
+            fallback_filter)
     except (OSError, ValueError, json.JSONDecodeError, KeyError) as error:
         raise SystemExit(f"{tool}: {error}")

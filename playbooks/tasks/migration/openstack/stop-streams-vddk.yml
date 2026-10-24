@@ -1,0 +1,58 @@
+---
+# playbooks/tasks/migration/openstack/stop-streams-vddk.yml
+# vim: set tabstop=2 shiftwidth=2 expandtab:
+
+# Stop every nbdkit that convert-disk-vddk.yml started for this run. Its
+# qemu-img then fails and its background job ends without renaming a partial
+# QCOW2 into place, so nothing keeps reading the source or writing the staging
+# directory while cleanup runs or a resume starts.
+#
+# Runs after a failure, and also at the start of a resume or discard: a run
+# whose ansible-playbook was killed outright never reached its own cleanup,
+# and its async conversions outlive it. The socket directory is named after
+# the run id, so the resume finds their pidfiles before its own conversions
+# overwrite them.
+#
+# A pidfile may be stale and its pid reused, so a pid is only signalled while
+# its command line still names this disk's socket.
+
+- name: Find the running disk streams
+  ansible.builtin.find:
+    paths: "{{ openstack_vddk_socket_dir }}"
+    patterns: "disk-*.pid"
+  register: openstack_vddk_stream_pids
+  when:
+    - openstack_vddk_socket_dir is defined
+    - not (migration_succeeded | default(false) | bool)
+
+- name: Stop the running disk streams
+  ansible.builtin.shell: |
+    set -eu
+    pidfile={{ item.path | quote }}
+    socket="${pidfile%.pid}.sock"
+    pid="$(cat "$pidfile" 2> /dev/null || true)"
+    case "$pid" in
+      '' | *[!0-9]*) exit 0 ;;
+    esac
+    ours() { tr '\0' '\n' 2> /dev/null < "/proc/$pid/cmdline" | grep -qxF -- "$socket" ; }
+    ours || exit 0
+    kill "$pid" 2> /dev/null || true
+    waited=0
+    while ours ; do
+      if [ "$waited" -ge 30 ] ; then
+        kill -9 "$pid" 2> /dev/null || true
+        break
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    echo "stopped $pid"
+  register: openstack_vddk_stream_stop
+  loop: "{{ openstack_vddk_stream_pids.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  changed_when: "'stopped' in openstack_vddk_stream_stop.stdout"
+  when:
+    - openstack_vddk_socket_dir is defined
+    - not (migration_succeeded | default(false) | bool)
+

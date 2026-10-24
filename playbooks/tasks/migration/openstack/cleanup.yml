@@ -4,6 +4,51 @@
 
 # Best-effort cleanup for OpenStack-owned artifacts.
 
+# A failed upload can leave the next disk's conversion running in the
+# background (import-disk*.yml starts it before uploading). Wait for every
+# conversion to end before cleanup or a resume touches the same staging files;
+# the datastore-direct method stops its streams first (stop-streams-vddk.yml),
+# so its conversions end at once.
+- name: Wait for background disk conversions to end
+  ansible.builtin.async_status:
+    jid: "{{ item.value }}"
+  register: openstack_convert_drain
+  until: openstack_convert_drain.finished | bool
+  retries: "{{ openstack_convert_poll_retries | int }}"
+  delay: 5
+  loop: "{{ openstack_convert_jobs | default({}) | dict2items }}"
+  loop_control:
+    label: "disk {{ item.key }}"
+  when: not (migration_succeeded | default(false) | bool)
+  failed_when: false
+
+# openstack_uploaded_image_names lists only this attempt's uploads. A resumed
+# run skips disks an earlier attempt already put in Glance, so a discard lists
+# the run's images by name prefix as well, as common/resume-vddk.yml does.
+- name: Find images earlier attempts of this run uploaded
+  openstack.cloud.image_info:
+    auth: "{{ openstack_auth }}"
+    region_name: "{{ openstack_region_name }}"
+  register: cleanup_run_image_info
+  no_log: true
+  failed_when: false
+  when:
+    - not (migration_succeeded | default(false) | bool)
+    - discard_failed_artifacts | bool
+    - migration_resume_mode | default(false) | bool
+    - openstack_image_prefix is defined
+
+- name: Queue earlier attempts' images for removal
+  ansible.builtin.set_fact:
+    openstack_uploaded_image_names: >-
+      {{ openstack_uploaded_image_names | default([])
+         | union(cleanup_run_image_info.images | map(attribute='name')
+                 | select('match', (openstack_image_prefix ~ '-disk-') | regex_escape)
+                 | list) }}
+  when:
+    - cleanup_run_image_info is not skipped
+    - cleanup_run_image_info.images is defined
+
 - name: Remove OpenStack images uploaded by this failed run
   openstack.cloud.image:
     auth: "{{ openstack_auth }}"

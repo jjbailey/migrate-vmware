@@ -56,9 +56,11 @@
       - "{{ gcp_instance_name }}"
       - "--zone={{ gcp_zone }}"
       - "--project={{ gcp_project }}"
-      - "--format=value(disks[].deviceName)"
+      # value(disks[].deviceName) prints every name on one ;-joined line, so
+      # read the disks as JSON and compare whole names instead.
+      - "--format=json(disks)"
   environment: "{{ gcp_gcloud_env }}"
-  register: gcp_attached_device_names
+  register: gcp_attached_disks
   changed_when: false
 
 - name: Attach the GCP data disk
@@ -75,7 +77,10 @@
       - "--project={{ gcp_project }}"
       - --quiet
   environment: "{{ gcp_gcloud_env }}"
-  when: gcp_data_device_name not in (gcp_attached_device_names.stdout_lines | default([]))
+  when: >-
+    gcp_data_device_name not in
+    ((gcp_attached_disks.stdout | from_json).disks | default([], true)
+     | map(attribute='deviceName') | list)
   changed_when: true
 
 - name: Record the GCP data disk

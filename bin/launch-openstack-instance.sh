@@ -40,28 +40,29 @@ wrapper_require_json_array OS_FIXED_IPS_JSON "$OS_FIXED_IPS_JSON"
 wrapper_require_json_array OS_NICS_JSON "$OS_NICS_JSON"
 
 args=()
-[ -n "$VM_NAME" ] && args+=(-e "vm_name=$VM_NAME")
-[ -n "$OS_FLAVOR" ] && args+=(-e "openstack_flavor=$OS_FLAVOR")
-[ -n "$OS_NICS_JSON" ] && args+=(-e "openstack_network=")
-[ -z "$OS_NICS_JSON" ] && [ -n "$OS_NETWORK" ] && args+=(-e "openstack_network=$OS_NETWORK")
-[ -n "$OS_NETWORK_ID" ] && args+=(-e "openstack_network_id=$OS_NETWORK_ID")
-args+=(-e "openstack_preserve_mac=$OS_PRESERVE_MAC")
-args+=(-e "openstack_auto_ip=$OS_AUTO_IP")
-[ -n "$OS_KEY_NAME" ] && args+=(-e "openstack_key_name=$OS_KEY_NAME")
-args+=(-e "openstack_dhcp_user_data=$OS_DHCP_USER_DATA")
-args+=(-e "openstack_config_drive=$OS_CONFIG_DRIVE")
+[ -n "$VM_NAME" ] && args+=(-e "$(wrapper_var vm_name "$VM_NAME")")
+[ -n "$OS_FLAVOR" ] && args+=(-e "$(wrapper_var openstack_flavor "$OS_FLAVOR")")
+[ -n "$OS_NICS_JSON" ] && args+=(-e "$(wrapper_var openstack_network "")")
+[ -z "$OS_NICS_JSON" ] && [ -n "$OS_NETWORK" ] && args+=(-e "$(wrapper_var openstack_network "$OS_NETWORK")")
+[ -n "$OS_NETWORK_ID" ] && args+=(-e "$(wrapper_var openstack_network_id "$OS_NETWORK_ID")")
+args+=(-e "$(wrapper_var openstack_preserve_mac "$OS_PRESERVE_MAC")")
+args+=(-e "$(wrapper_var openstack_auto_ip "$OS_AUTO_IP")")
+[ -n "$OS_KEY_NAME" ] && args+=(-e "$(wrapper_var openstack_key_name "$OS_KEY_NAME")")
+args+=(-e "$(wrapper_var openstack_dhcp_user_data "$OS_DHCP_USER_DATA")")
+args+=(-e "$(wrapper_var openstack_config_drive "$OS_CONFIG_DRIVE")")
 
 if [ -n "$OS_SECURITY_GROUP_IDS_JSON" ] ; then
-    args+=(-e "{\"openstack_security_groups\": [], \"openstack_security_group_ids\": $OS_SECURITY_GROUP_IDS_JSON}")
+    args+=(-e "$(wrapper_json_var openstack_security_groups '[]')")
+    args+=(-e "$(wrapper_json_var openstack_security_group_ids "$OS_SECURITY_GROUP_IDS_JSON")")
 else
-    args+=(-e "{\"openstack_security_groups\": $OS_SECURITY_GROUPS_JSON}")
+    args+=(-e "$(wrapper_json_var openstack_security_groups "$OS_SECURITY_GROUPS_JSON")")
 fi
 
-[ -n "$OS_MAC_ADDRESSES_JSON" ] && args+=(-e "openstack_mac_addresses=$OS_MAC_ADDRESSES_JSON")
-[ -n "$OS_FIXED_IPS_JSON" ] && args+=(-e "openstack_fixed_ips=$OS_FIXED_IPS_JSON")
-[ -n "$OS_NICS_JSON" ] && args+=(-e "{\"openstack_nics\": $OS_NICS_JSON}")
-[ -n "$OS_PROJECT_NAME" ] && args+=(-e "openstack_target_project=$OS_PROJECT_NAME")
-[ -n "$OS_USER_DATA" ] && args+=(-e "openstack_user_data=$OS_USER_DATA")
-[ -n "$OS_USER_DATA_FILE" ] && args+=(-e "openstack_user_data_file=$OS_USER_DATA_FILE")
+[ -n "$OS_MAC_ADDRESSES_JSON" ] && args+=(-e "$(wrapper_json_var openstack_mac_addresses "$OS_MAC_ADDRESSES_JSON")")
+[ -n "$OS_FIXED_IPS_JSON" ] && args+=(-e "$(wrapper_json_var openstack_fixed_ips "$OS_FIXED_IPS_JSON")")
+[ -n "$OS_NICS_JSON" ] && args+=(-e "$(wrapper_json_var openstack_nics "$OS_NICS_JSON")")
+[ -n "$OS_PROJECT_NAME" ] && args+=(-e "$(wrapper_var openstack_target_project "$OS_PROJECT_NAME")")
+[ -n "$OS_USER_DATA" ] && args+=(-e "$(wrapper_var openstack_user_data "$OS_USER_DATA")")
+[ -n "$OS_USER_DATA_FILE" ] && args+=(-e "$(wrapper_var openstack_user_data_file "$OS_USER_DATA_FILE")")
 
 wrapper_run_playbook playbooks/launch-openstack-instance.yml "${args[@]}" "${wrapper_extra_args[@]}" -v

@@ -19,7 +19,9 @@
   vars:
     migration_target: aws
 
-    import_poll_retries: 120
+    # 480 x 30s is a four-hour window: a large OVA can still be progressing
+    # after an hour, and a timeout cancels the import.
+    import_poll_retries: 480
     import_poll_delay: 30
 
   tasks:

@@ -15,6 +15,11 @@ CentOS 7 guests with static IP addresses can first be staged with
 guest to DHCP. This is a separate, optional step before an OpenStack run and
 is not part of the diagram below.
 
+An OpenStack run can alternatively use the datastore-direct method
+(`playbooks/migrate-openstack-vm-vddk.yml`), which skips the clone and the OVF
+export: it snapshots the running VM and streams the frozen disks straight from
+the datastore. See [datastore-direct.md](datastore-direct.md).
+
 ```mermaid
 flowchart LR
     VM["VMware"]

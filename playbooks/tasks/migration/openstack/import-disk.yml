@@ -37,6 +37,14 @@
 
 - name: Process this disk's upload
   block:
+    # Recorded before the upload: a failed upload can still leave a queued or
+    # saving image behind, and discard cleanup removes images by this list.
+    # Deleting a name that never got an image is harmless.
+    - name: Track this disk's image name for optional failure cleanup
+      ansible.builtin.set_fact:
+        openstack_uploaded_image_names: >-
+          {{ openstack_uploaded_image_names + [openstack_image_prefix ~ '-disk-' ~ (openstack_disk.index | string)] }}
+
     - name: Upload this disk to Glance
       openstack.cloud.image:
         auth: "{{ openstack_auth }}"
@@ -51,14 +59,6 @@
         properties: "{{ {'hw_firmware_type': openstack_boot_mode} if (openstack_disk.index | int == 0) else {} }}"
       register: disk_image_upload
       no_log: true
-
-    - name: Track newly uploaded image for optional failure cleanup
-      ansible.builtin.set_fact:
-        openstack_uploaded_image_ids: >-
-          {{ openstack_uploaded_image_ids + [disk_image_upload.image.id] }}
-        openstack_uploaded_image_names: >-
-          {{ openstack_uploaded_image_names + [openstack_image_prefix ~ '-disk-' ~ (openstack_disk.index | string)] }}
-      when: disk_image_upload.image.id is defined
 
     - name: Record the uploaded image for this disk
       ansible.builtin.set_fact:
