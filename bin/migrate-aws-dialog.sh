@@ -36,10 +36,10 @@ fi
 
 say "Migration summary for $VM_NAME
 
-  Source vCenter.: ${VSPHERE_TARGET_VCENTER:-${VCENTER_DATACENTER:-auto-select}}
-  AWS account....: ${AWS_TARGET_PROJECT:-auto-select}
-  Validate certs.: ${VALIDATE_CERTS:-vault default}
-  Artifact root..: $ARTIFACT_ROOT
+  Source vCenter..: ${VSPHERE_TARGET_VCENTER:-${VCENTER_DATACENTER:-auto-select}}
+  AWS account.....: ${AWS_TARGET_PROJECT:-auto-select}
+  Validate certs..: ${VALIDATE_CERTS:-vault default}
+  Artifact root...: $ARTIFACT_ROOT
   Quiesce snapshot: $QUIESCE_SNAPSHOT" 14
 
 file=$(mktemp /tmp/migrate-aws.XXXXXX)

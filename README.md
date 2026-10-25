@@ -242,7 +242,7 @@ migrate-vmware/
 │   ├── lookup-migration-*.py    # Migration catalog lookups
 │   ├── append-*-catalog.py      # Migration and deployment catalog appenders
 │   ├── reconcile-catalog-*.py   # Removes catalog entries gone from AWS, GCP, or OpenStack
-│   ├── openstack-project-facts.py  # Images, security groups, networks, keys, quotas for one project
+│   ├── openstack-project-facts.py  # Images, flavors, security groups, networks, keys, quotas for one project
 │   ├── inspect-ova.py           # OVA inspection
 │   └── *-vault.sh               # Vault management scripts
 ├── catalogs/                    # Migration and deployment catalogs
@@ -295,8 +295,8 @@ fails, it deletes what that attempt created: the server first, then the
 pre-created ports and the data volumes.
 
 To see which names and IDs a project can use, run
-`./bin/openstack-project-facts.py <project>`. It lists the images, security
-groups, networks, and keypairs that project can use, filtered to the
+`./bin/openstack-project-facts.py <project>`. It lists the images, flavors,
+security groups, networks, and keypairs that project can use, filtered to the
 authenticated project even when the account is an admin. `<project>` is a
 vault key, `project_name`, or `project_id` from `vaults/openstack.yml`. You
 can leave it out when the vault has one project or `OS_*` credentials are
@@ -307,6 +307,12 @@ only when open to the project: where the `access_as_external` RBAC policies
 are visible, one with policies must have one for this project or `*`.
 Keypairs belong to the OpenStack user, not the project, so the keypair list is
 the authenticated user's.
+
+Flavors are listed when enabled and either public or private with access
+granted to the project, smallest first. The `FITS` column says whether one more
+server of that flavor fits the project's remaining instance, core, and RAM
+quota. Run `./bin/openstack-project-facts.py <project> --flavors` to see only
+the flavors; `--flavors --quotas` shows both sections.
 
 The same script ends with the project's quotas as `used/total` for compute
 (instances, cores, RAM, server groups), volumes (count, GB, snapshots,

@@ -148,7 +148,7 @@ case "$ud_mode" in
 esac
 
 while : ; do
-    FLAVOR=$(input "OpenStack flavor (instance size):" "s1-8") || abort
+    FLAVOR=$(input "OpenStack flavor (instance size):" "s1-4") || abort
     KEY_NAME=$(input "SSH key pair name registered in OpenStack:" "cloud") || abort
     NETWORK=$(input "OpenStack network name:" "Ext-Net") || abort
     [ -n "$FLAVOR" ] && [ -n "$KEY_NAME" ] && [ -n "$NETWORK" ] && break
