@@ -55,9 +55,17 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   ```
 
 - Network access from the control host to vCenter and the selected cloud APIs.
-- Ansible, the `amazon.aws`, `community.vmware`, and
-  `openstack.cloud` collections, `govc`, `gcloud`, the AWS CLI (`aws`),
-  `qemu-img`, and the Python AWS/vSphere libraries. The `gcloud` and `aws`
+- Ansible, the `amazon.aws`, `community.vmware`, `openstack.cloud`, and
+  `azure.azcollection` collections; `govc`, `gcloud`, the AWS CLI (`aws`), the
+  Azure CLI (`az`), `qemu-img`, and the Python AWS/vSphere libraries. Azure is
+  currently a repository/tooling prerequisite only; there is no Azure migration
+  or launch workflow yet. The pinned
+  [`azure.azcollection` 3.21.0 collection](https://docs.ansible.com/projects/ansible/latest/collections/azure/azcollection/)
+  requires Python 3.10 or newer. Install the Azure CLI separately using Microsoft's
+  [Azure CLI installation guide](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli).
+  The Azure collection's Python requirements are in its installed
+  `requirements.txt` and must be installed into the same Python environment used
+  by Ansible; the One-time Setup section gives the command. The `gcloud` and `aws`
   CLIs stage the large disk artifacts because both upload in parallel chunks
   and resume a failed part, which the collections' upload modules do not. The control host also needs the Python dependencies
   used by the installed collections, including `boto3`, `pyVmomi`,
@@ -135,8 +143,21 @@ nbdkit --version     # datastore-direct OpenStack migrations
 nbdkit vddk --dump-plugin | grep vddk_library_version   # its faster VixDiskLib backend (recommended)
 gcloud --version     # GCP migrations
 aws --version        # AWS migrations
+az version           # Azure tooling setup; no Azure workflow yet
 command -v dialog || command -v whiptail   # interactive dialogs only
 ```
+
+The Azure collection's Python dependencies must be installed into the same
+Python environment that runs Ansible. With the default Ansible collection
+path, run:
+
+```bash
+python -m pip install -r ~/.ansible/collections/ansible_collections/azure/azcollection/requirements.txt
+```
+
+If you install collections in a custom path, use that path instead. Azure CLI
+authentication and Azure-specific vault values will be documented with the
+Azure workflow when it is added.
 
 The vault helpers (`bin/*-vault.sh`) prefer the `ansible-vault` in
 `$DIB7_VENV_BIN` (default `~/.dib7/bin`) and otherwise use the one on `PATH`.
