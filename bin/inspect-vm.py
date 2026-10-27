@@ -33,16 +33,29 @@ from pathlib import Path
 UNADDRESSED = 2 ** 31
 
 def disk_devices(devices):
-    """Return the virtual disks among a VM's hardware devices."""
+    """Return the virtual disks among a VM's hardware devices.
+
+    A device is a disk when it names itself one, or (for JSON that omits
+    _typeName) when it carries both a backing and a capacity. The fields below
+    are then read unconditionally, so a disk missing its device key or backing
+    is refused here instead of surfacing later as an uncaught KeyError.
+    """
     disks = []
     for device in devices:
+        if not isinstance(device, dict):
+            continue
         type_name = device.get("_typeName")
         if type_name is not None:
-            if type_name == "VirtualDisk":
-                disks.append(device)
-        elif isinstance(device.get("backing"), dict) and (
-                "capacityInBytes" in device or "capacityInKB" in device):
-            disks.append(device)
+            if type_name != "VirtualDisk":
+                continue
+        elif not (isinstance(device.get("backing"), dict) and (
+                "capacityInBytes" in device or "capacityInKB" in device)):
+            continue
+        if device.get("key") is None:
+            raise ValueError("a virtual disk device has no key")
+        if not isinstance(device.get("backing"), dict):
+            raise ValueError(f"disk {device['key']} has no backing")
+        disks.append(device)
     return disks
 
 def capacity_bytes(device):
@@ -174,7 +187,7 @@ def main():
     try:
         text = args.json_file.read_text() if args.json_file else sys.stdin.read()
         print(json.dumps(inspect_vm(json.loads(text)), indent=2, sort_keys=False))
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, KeyError) as error:
         raise SystemExit(f"inspect-vm: {error}")
 
 if __name__ == "__main__":

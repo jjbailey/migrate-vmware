@@ -20,7 +20,7 @@ import sys
 
 from pyVim.connect import Disconnect, SmartConnect
 from pyVim.task import WaitForTask
-from pyVmomi import vim
+from pyVmomi import vim, vmodl
 
 def find_vm(content, datacenter, name):
     """Return the one VM called name under the datacenter, or raise ValueError."""
@@ -57,7 +57,10 @@ def main():
     if args.insecure:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-    service = SmartConnect(host=args.vcenter, user=user, pwd=password, sslContext=context)
+    try:
+        service = SmartConnect(host=args.vcenter, user=user, pwd=password, sslContext=context)
+    except (OSError, ssl.SSLError, vmodl.MethodFault) as error:
+        raise SystemExit(f"enable-cbt: {error}")
     try:
         vm = find_vm(service.RetrieveContent(), args.datacenter, args.vm)
         if vm.config.changeTrackingEnabled:
@@ -67,7 +70,7 @@ def main():
         if not vm.config.changeTrackingEnabled:
             raise SystemExit("enable-cbt: vCenter finished the task but CBT is still disabled")
         print(f"CBT enabled on {args.vm}")
-    except (ValueError, vim.fault.VimFault) as error:
+    except (OSError, ValueError, vmodl.MethodFault) as error:
         raise SystemExit(f"enable-cbt: {error}")
     finally:
         Disconnect(service)

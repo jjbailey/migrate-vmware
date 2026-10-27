@@ -36,9 +36,9 @@ fi
 
 say "Migration summary for $VM_NAME
 
-  Source vCenter.: ${VSPHERE_TARGET_VCENTER:-${VCENTER_DATACENTER:-auto-select}}
-  GCP project....: ${GCP_TARGET_PROJECT:-auto-select}
-  Validate certs.: ${VALIDATE_CERTS:-vault default}
+  Source vCenter..: ${VSPHERE_TARGET_VCENTER:-${VCENTER_DATACENTER:-auto-select}}
+  GCP project.....: ${GCP_TARGET_PROJECT:-auto-select}
+  Validate certs..: ${VALIDATE_CERTS:-vault default}
   Quiesce snapshot: $QUIESCE_SNAPSHOT" 14
 
 file=$(mktemp /tmp/migrate-gcp.XXXXXX)

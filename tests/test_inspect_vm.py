@@ -122,6 +122,20 @@ class InspectVmTests(unittest.TestCase):
         manifest = inspect_vm.inspect_vm(vm_info(controller(1000, 0), nic, device))
         self.assertEqual(manifest["disk_count"], 1)
 
+    def test_refuses_a_disk_without_a_key(self):
+        # Without a device key the manifest cannot be built; that used to
+        # surface as an uncaught KeyError instead of a clean error.
+        device = disk(2000, 1000, 0, "[ds] a.vmdk")
+        del device["key"]
+        with self.assertRaisesRegex(ValueError, "has no key"):
+            inspect_vm.inspect_vm(vm_info(controller(1000, 0), device))
+
+    def test_refuses_a_disk_without_a_backing(self):
+        device = disk(2000, 1000, 0, "[ds] a.vmdk")
+        del device["backing"]
+        with self.assertRaisesRegex(ValueError, "has no backing"):
+            inspect_vm.inspect_vm(vm_info(controller(1000, 0), device))
+
     def test_refuses_unsupported_disks(self):
         cases = {
             "independent_persistent": {"diskMode": "independent_persistent"},

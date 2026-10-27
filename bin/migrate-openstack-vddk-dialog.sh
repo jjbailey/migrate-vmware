@@ -46,11 +46,11 @@ fi
 
 say "Migration summary for $VM_NAME (datastore-direct)
 
-  Source vCenter.: ${VSPHERE_TARGET_VCENTER:-${VCENTER_DATACENTER:-auto-select}}
-  OS project.....: ${OS_PROJECT_NAME:-auto-select}
-  Validate certs.: ${VALIDATE_CERTS:-vault default}
+  Source vCenter..: ${VSPHERE_TARGET_VCENTER:-${VCENTER_DATACENTER:-auto-select}}
+  OS project......: ${OS_PROJECT_NAME:-auto-select}
+  Validate certs..: ${VALIDATE_CERTS:-vault default}
   Quiesce snapshot: $QUIESCE_SNAPSHOT
-  Compress images: $COMPRESS" 15
+  Compress images.: $COMPRESS" 15
 
 file=$(mktemp /tmp/migrate-openstack-vddk.XXXXXX)
 {

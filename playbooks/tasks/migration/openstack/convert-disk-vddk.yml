@@ -21,9 +21,13 @@
 # openstack_vddk_local=true (a local file, for tests).
 
 - name: Write the vCenter password where nbdkit can read it without argv
+  # Per disk, and removed by that disk's own conversion shell when it ends: a
+  # shared file could be deleted by the previous disk's shell while the next
+  # disk's nbdkit still had to read it, and a single file would outlive every
+  # conversion in the run.
   ansible.builtin.copy:
     content: "{{ vcenter_password }}"
-    dest: "{{ openstack_vddk_socket_dir }}/password"
+    dest: "{{ openstack_vddk_socket_dir }}/password-{{ openstack_convert_disk.index }}"
     mode: "0600"
   when: not (openstack_vddk_local | bool)
   no_log: true
@@ -33,7 +37,7 @@
     # "[datastore] dir/disk.vmdk" is served as dir/disk-flat.vmdk.
     openstack_vddk_datastore: "{{ openstack_convert_disk.path | regex_replace('^\\[([^\\]]+)\\].*$', '\\1') }}"
     openstack_vddk_relative: "{{ openstack_convert_disk.path | regex_replace('^\\[[^\\]]+\\]\\s*(.*)\\.vmdk$', '\\1') }}-flat.vmdk"
-    openstack_vddk_password_arg: "password=+{{ openstack_vddk_socket_dir }}/password"
+    openstack_vddk_password_arg: "password=+{{ openstack_vddk_socket_dir }}/password-{{ openstack_convert_disk.index }}"
     openstack_vddk_args_vddk: >-
       {{ (['libdir=' ~ openstack_vddk_libdir] if (openstack_vddk_libdir | length > 0) else [])
          + ['server=' ~ vcenter_hostname,
@@ -87,6 +91,7 @@
     set -eu
     socket={{ (openstack_vddk_socket_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.sock') | quote }}
     pidfile={{ (openstack_vddk_socket_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.pid') | quote }}
+    password={{ (openstack_vddk_socket_dir ~ '/password-' ~ openstack_convert_disk.index) | quote }}
     log={{ (migration_run_dir ~ '/nbdkit-disk-' ~ openstack_convert_disk.index ~ '.log') | quote }}
     temporary={{ (openstack_staging_dir ~ '/disk-' ~ openstack_convert_disk.index ~ '.qcow2.tmp') | quote }}
     rm -f "$socket" "$pidfile" "$temporary"
@@ -94,7 +99,7 @@
       {{ openstack_vddk_plugin | quote }} {{ openstack_vddk_plugin_args | map('quote') | join(' ') }} \
       2> "$log" &
     nbdkit_pid=$!
-    trap 'kill "$nbdkit_pid" 2> /dev/null || true' EXIT
+    trap 'kill "$nbdkit_pid" 2> /dev/null || true; rm -f "$password" || true' EXIT
     waited=0
     until [ -s "$pidfile" ] ; do
       if ! kill -0 "$nbdkit_pid" 2> /dev/null ; then

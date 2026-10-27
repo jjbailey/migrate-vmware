@@ -2,8 +2,8 @@
 # bin/openstack-project-facts.py
 # vim: set tabstop=4 shiftwidth=4 expandtab:
 
-"""Show the images, security groups, networks, and keypairs one OpenStack
-project can use.
+"""Show the images, flavors, security groups, networks, and keypairs one
+OpenStack project can use.
 
 Credentials come from vaults/openstack.yml (openstack_projects, matched by
 vault key, project_name, or project_id, the same way select-project.yml does),
@@ -13,6 +13,10 @@ see other projects' resources:
 
   images           active, and public, owned by the project, or shared with
                    it (membership accepted)
+  flavors          enabled, and public or private with access granted to the
+                   project; FITS says whether one more server of that flavor
+                   fits the remaining instances/cores/RAM quota; --flavors
+                   shows only this section
   security groups  owned by the project, or RBAC-shared to it
   networks         owned by the project, shared, RBAC-shared to it, or
                    external and open to it (external ones are marked; they
@@ -23,6 +27,9 @@ see other projects' resources:
   quotas           compute, volume, and network usage as used/total, flagged
                    LOW at --warn-percent and FULL at the limit; --quotas
                    shows only this section
+
+--flavors, --quotas, --security-groups, --networks, and --keypairs narrow
+the output to those sections, and can be combined.
 """
 
 import argparse
@@ -179,6 +186,72 @@ def gather_images(conn, project_id):
         })
     return sorted(images, key=lambda i: (i["name"] or "", i["created"] or ""))
 
+def flavor_granted(conn, flavor, project_id):
+    """Whether a private flavor has been granted to this project.
+
+    Listing a flavor's access needs admin. A non-admin user only sees the
+    private flavors granted to their project, so a refused lookup means the
+    flavor is visible because it was granted.
+    """
+    try:
+        access = conn.compute.get_flavor_access(flavor)
+    except openstack.exceptions.SDKException:
+        return True
+    return any(entry.get("tenant_id") == project_id for entry in access)
+
+def compute_headroom(conn, project_id):
+    """Free instances, cores, and RAM (MB); None means unlimited.
+
+    Returns None when the compute quota cannot be read, so flavors are
+    listed without a fits answer rather than a wrong one.
+    """
+    try:
+        quota = conn.compute.get_quota_set(project_id, usage=True)
+    except openstack.exceptions.SDKException as exc:
+        print(f"warning: compute quotas unavailable: {exc}", file=sys.stderr)
+        return None
+    headroom = {}
+    for resource in ("instances", "cores", "ram"):
+        limit = getattr(quota, resource)
+        used = quota.usage.get(resource) or 0
+        headroom[resource] = None if limit is None or limit < 0 else max(limit - used, 0)
+    return headroom
+
+def flavor_fits(flavor, headroom):
+    if headroom is None:
+        return ""
+    needs = {"instances": 1, "cores": flavor.vcpus or 0, "ram": flavor.ram or 0}
+    fits = all(headroom[resource] is None or needed <= headroom[resource]
+               for resource, needed in needs.items())
+    return "yes" if fits else "no"
+
+def gather_flavors(conn, project_id):
+    headroom = compute_headroom(conn, project_id)
+    flavors = []
+    # is_public=None lists private flavors too; for an admin that is every
+    # private flavor, so each one is checked against its access list.
+    for flavor in conn.compute.flavors(details=True, is_public=None):
+        if flavor.is_disabled:
+            continue
+        if flavor.is_public:
+            access = "public"
+        elif flavor_granted(conn, flavor, project_id):
+            access = "private"
+        else:
+            continue
+        flavors.append({
+            "name": flavor.name,
+            "id": flavor.id,
+            "vcpus": flavor.vcpus,
+            "ram_mb": flavor.ram or 0,
+            "disk_gb": flavor.disk,
+            "ephemeral_gb": flavor.ephemeral or 0,
+            "swap_mb": flavor.swap or 0,
+            "access": access,
+            "fits": flavor_fits(flavor, headroom),
+        })
+    return sorted(flavors, key=lambda f: (f["vcpus"] or 0, f["ram_mb"], f["name"] or ""))
+
 def gather_security_groups(conn, project_id):
     shared = rbac_shared_ids(conn, project_id, "security_group")
     groups = []
@@ -332,8 +405,19 @@ def main():
         "--region-name", help="override the vault's region_name")
     parser.add_argument("--json", action="store_true",
                         help="print JSON instead of tables")
+    parser.add_argument("--flavors", action="store_true",
+                        help="show only flavors (combine with others for more)")
+    parser.add_argument("--security-groups", dest="security_groups",
+                        action="store_true",
+                        help="show only security groups (combine with others for more)")
+    parser.add_argument("--networks", dest="networks",
+                        action="store_true",
+                        help="show only networks (combine with others for more)")
+    parser.add_argument("--keypairs", dest="keypairs",
+                        action="store_true",
+                        help="show only keypairs (combine with others for more)")
     parser.add_argument("--quotas", action="store_true",
-                        help="show only quota usage")
+                        help="show only quota usage (combine with others for more)")
     parser.add_argument(
         "--warn-percent", type=int, default=80, metavar="N",
         help="flag a quota LOW at N%% used (default: %(default)s)")
@@ -349,14 +433,27 @@ def main():
     except (AttributeError, openstack.exceptions.SDKException):
         project_name = ""
 
+    # --flavors / --security-groups / --networks / --keypairs / --quotas
+    # narrow the output to those sections; with none, every section is shown.
+    only = {name for name in ("flavors", "security_groups", "networks",
+                              "keypairs", "quotas")
+            if getattr(args, name)}
+    show_all = not only
+
     facts = {"project": {"name": project_name, "id": project_id,
                          "region": conn.config.get_region_name() or ""}}
-    if not args.quotas:
+    if show_all:
         facts["images"] = gather_images(conn, project_id)
+    if show_all or "flavors" in only:
+        facts["flavors"] = gather_flavors(conn, project_id)
+    if show_all or "security_groups" in only:
         facts["security_groups"] = gather_security_groups(conn, project_id)
+    if show_all or "networks" in only:
         facts["networks"] = gather_networks(conn, project_id)
+    if show_all or "keypairs" in only:
         facts["keypairs"] = gather_keypairs(conn)
-    facts["quotas"] = gather_quotas(conn, project_id, args.warn_percent)
+    if show_all or "quotas" in only:
+        facts["quotas"] = gather_quotas(conn, project_id, args.warn_percent)
 
     if args.json:
         json.dump(facts, sys.stdout, indent=2, default=str)
@@ -366,17 +463,25 @@ def main():
     project = facts["project"]
     print(f"OpenStack project: {project['name'] or '<unknown>'} ({project['id']})"
           + (f", region {project['region']}" if project["region"] else ""))
-    if not args.quotas:
+    if "images" in facts:
         print_table("Images", facts["images"],
                     ["name", "id", "access", "disk_format", "size_gb", "created"])
+    if "flavors" in facts:
+        print_table("Flavors", facts["flavors"],
+                    ["name", "id", "vcpus", "ram_mb", "disk_gb", "ephemeral_gb",
+                     "swap_mb", "access", "fits"])
+    if "security_groups" in facts:
         print_table("Security groups", facts["security_groups"],
                     ["name", "id", "access", "rules", "description"])
+    if "networks" in facts:
         print_table("Networks", facts["networks"],
                     ["name", "id", "access", "status", "subnets"])
+    if "keypairs" in facts:
         print_table("Keypairs (per user, not per project)", facts["keypairs"],
                     ["name", "type", "fingerprint"])
-    print_table("Quotas", facts["quotas"],
-                ["service", "resource", "used_total", "free", "percent", "status"])
+    if "quotas" in facts:
+        print_table("Quotas", facts["quotas"],
+                    ["service", "resource", "used_total", "free", "percent", "status"])
     return 0
 
 if __name__ == "__main__":

@@ -179,6 +179,97 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual([(r["access"], r["external"]) for r in rows],
                          [("shared", True)])
 
+def flavor(name, vcpus=2, ram=4000, public=True, disabled=False):
+    return SimpleNamespace(id=f"f-{name}", name=name, vcpus=vcpus, ram=ram,
+                           disk=20, ephemeral=0, swap=0, is_public=public,
+                           is_disabled=disabled)
+
+class FakeCompute:
+    """conn.compute with flavors, per-flavor access lists, and a quota set.
+
+    An access list of None makes the lookup fail, as Nova does for a
+    non-admin; a quota of None makes the quota lookup fail.
+    """
+
+    def __init__(self, flavors=(), access=None, quota=None):
+        self._flavors = list(flavors)
+        self.access = access or {}
+        self.quota = quota
+
+    def flavors(self, details=True, is_public=None):
+        return iter(self._flavors)
+
+    def get_flavor_access(self, item):
+        found = self.access.get(item.name, [])
+        if found is None:
+            raise openstack.exceptions.ForbiddenException("not allowed")
+        return found
+
+    def get_quota_set(self, project, usage=False):
+        if self.quota is None:
+            raise openstack.exceptions.ForbiddenException("not allowed")
+        return self.quota
+
+def quota(instances=(1, 3), cores=(2, 6), ram=(8000, 21000)):
+    """Compute quota set from (used, limit) pairs."""
+    return SimpleNamespace(
+        instances=instances[1], cores=cores[1], ram=ram[1],
+        usage={"instances": instances[0], "cores": cores[0], "ram": ram[0]})
+
+class FlavorTests(unittest.TestCase):
+    def gather(self, **kwargs):
+        rows = facts.gather_flavors(
+            SimpleNamespace(compute=FakeCompute(**kwargs)), PROJECT)
+        return {r["name"]: r for r in rows}
+
+    def test_private_flavors_need_access_for_this_project(self):
+        rows = self.gather(flavors=[
+            flavor("pub"), flavor("mine", public=False),
+            flavor("theirs", public=False), flavor("off", disabled=True)],
+            access={"mine": [{"flavor_id": "f-mine", "tenant_id": PROJECT}],
+                    "theirs": [{"flavor_id": "f-theirs", "tenant_id": "p-other"}]},
+            quota=quota())
+        self.assertEqual({n: r["access"] for n, r in rows.items()},
+                         {"pub": "public", "mine": "private"})
+
+    def test_private_flavor_kept_when_access_lookup_refused(self):
+        rows = self.gather(flavors=[flavor("granted", public=False)],
+                           access={"granted": None}, quota=quota())
+        self.assertEqual(rows["granted"]["access"], "private")
+
+    def test_fits_checks_instances_cores_and_ram(self):
+        # 4 cores and 13000 MB free, 2 instances left.
+        rows = self.gather(flavors=[
+            flavor("small", vcpus=2, ram=4000),
+            flavor("exact", vcpus=4, ram=13000),
+            flavor("too-many-cores", vcpus=8, ram=4000),
+            flavor("too-much-ram", vcpus=2, ram=16000)], quota=quota())
+        self.assertEqual({n: r["fits"] for n, r in rows.items()},
+                         {"small": "yes", "exact": "yes",
+                          "too-many-cores": "no", "too-much-ram": "no"})
+
+    def test_no_instances_left_fits_nothing(self):
+        rows = self.gather(flavors=[flavor("small", vcpus=1, ram=512)],
+                           quota=quota(instances=(3, 3)))
+        self.assertEqual(rows["small"]["fits"], "no")
+
+    def test_unlimited_quota_fits(self):
+        rows = self.gather(flavors=[flavor("huge", vcpus=64, ram=512000)],
+                           quota=quota(cores=(2, -1), ram=(8000, -1)))
+        self.assertEqual(rows["huge"]["fits"], "yes")
+
+    def test_unreadable_quota_leaves_fits_blank(self):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rows = self.gather(flavors=[flavor("small")], quota=None)
+        self.assertEqual(rows["small"]["fits"], "")
+        self.assertIn("compute quotas unavailable", err.getvalue())
+
+    def test_sorted_by_vcpus_then_ram(self):
+        rows = facts.gather_flavors(SimpleNamespace(compute=FakeCompute(
+            flavors=[flavor("b", vcpus=2, ram=8000), flavor("a", vcpus=4, ram=4000),
+                     flavor("c", vcpus=2, ram=4000)], quota=quota())), PROJECT)
+        self.assertEqual([r["name"] for r in rows], ["c", "b", "a"])
+
 class ConnectTests(unittest.TestCase):
     def args(self, **overrides):
         values = {"cloud": None, "project": None, "region_name": None,

@@ -126,11 +126,16 @@ be read (an untrusted certificate, a wrong URL, a refused login).
 
 ## Requirements
 
-- On the control host: `nbdkit`, `qemu-img`, `govc`, and the Ansible collections
-  in `requirements.yml`. No `ovftool`.
+- On the control host: a Linux host (the stream bookkeeping reads `/proc` to
+  confirm a pid still belongs to this run's socket, and relies on POSIX
+  signals), `nbdkit`, `qemu-img`, `govc`, and the Ansible collections in
+  `requirements.yml`. No `ovftool`.
 - For the `vddk` backend: nbdkit's `vddk` plugin and a VixDiskLib (below).
 - vCenter credentials from `vaults/vsphere.yml`, as for the other methods. The
-  password is handed to nbdkit through a mode-0600 file, never on a command line.
+  password is handed to nbdkit through a mode-0600 file, never on a command line;
+  that file is per disk. The conversion shell removes it when the conversion
+  ends; if the controller is killed first, the resume or discard that stops the
+  leftover stream removes it, and cleanup removes the socket directory.
 - The playbook refuses, before creating anything:
   - independent-persistent or independent-nonpersistent disks (a snapshot does
     not freeze them),
@@ -229,3 +234,9 @@ Not yet tested: resume after a failure, VMs that already have snapshots (`vddk`
 backend), and VMFS, vSAN, or vVol datastores. VixDiskLib's allocated-block query
 is used, but the NFS datastore reported every block allocated, so zeros were
 still read.
+
+**Resume is therefore experimental.** The retention, `resume_run_id`, and
+`discard_run_id` paths are implemented and the backend used by a run is pinned
+in its manifest so a resume cannot silently read a disk differently, but a
+resumed datastore-direct run has not been exercised against a real vCenter.
+Prefer `discard_run_id` plus a fresh run until it has been.
