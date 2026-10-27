@@ -20,44 +20,17 @@ subnetwork pickers).
 
 import argparse
 import json
-import os
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
 REPO_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from vault_common import read_vault  # noqa: E402
+
 COMPUTE_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 COMPUTE_API = "https://compute.googleapis.com/compute/v1/projects"
-
-def ansible_vault_bin():
-    venv_bin = Path(os.environ.get("DIB7_VENV_BIN", Path.home() / ".dib7/bin"))
-    candidate = venv_bin / "ansible-vault"
-    if os.access(candidate, os.X_OK):
-        return str(candidate)
-    found = shutil.which("ansible-vault")
-    if not found:
-        raise SystemExit(
-            "ansible-vault not found in $DIB7_VENV_BIN or on PATH")
-    return found
-
-def read_vault(vault):
-    """Decrypt the vault. Password lookup matches edit-vault.sh."""
-    command = [ansible_vault_bin(), "view", str(vault)]
-    for passfile in (os.environ.get("VAULT_PASSWORD_FILE"),
-                     str(Path.home() / ".ssh/dib-vault-pass")):
-        if passfile and Path(passfile).is_file():
-            if Path(passfile).stat().st_size:
-                command += ["--vault-password-file", passfile]
-                break
-    result = subprocess.run(
-        command, stdout=subprocess.PIPE, text=True, check=False)
-    if result.returncode != 0:
-        raise SystemExit(f"could not decrypt {vault}")
-    return yaml.safe_load(result.stdout) or {}
 
 def select_vault_entry(vault, requested):
     data = read_vault(vault)

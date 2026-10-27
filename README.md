@@ -253,8 +253,8 @@ migrate-vmware/
 │   ├── append-*-catalog.py      # Migration and deployment catalog appenders
 │   ├── reconcile-catalog-*.py   # Removes catalog entries gone from AWS, GCP, or OpenStack
 │   ├── openstack-project-facts.py  # Images, flavors, security groups, networks, keys, quotas for one project
-│   ├── aws-project-facts.py       # Subnets, security groups, keypairs for one AWS account/region
-│   ├── gcp-project-facts.py       # Zones, machine types, networks, subnetworks for one GCP project
+│   ├── aws-project-facts.py     # Subnets, security groups, keypairs for one AWS account/region
+│   ├── gcp-project-facts.py     # Zones, machine types, networks, subnetworks for one GCP project
 │   ├── inspect-ova.py           # OVA inspection
 │   └── *-vault.sh               # Vault management scripts
 ├── catalogs/                    # Migration and deployment catalogs
@@ -262,7 +262,7 @@ migrate-vmware/
 ├── examples/                    # OpenStack launch matrix and sample cloud-init data
 ├── playbooks/                   # Ansible playbooks
 │   ├── migrate-{aws,gcp,openstack}-vm.yml
-│   ├── migrate-openstack-vm-vddk.yml   # Datastore-direct: no clone, no OVF
+│   ├── migrate-openstack-vm-vddk.yml     # Datastore-direct: no clone, no OVF
 │   ├── launch-{aws,gcp,openstack}-instance.yml
 │   ├── bootstrap-aws-import.yml
 │   ├── stage-v2v.yml            # Installs the one-time DHCP reconfigure script
