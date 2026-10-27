@@ -28,7 +28,8 @@ see other projects' resources:
                    LOW at --warn-percent and FULL at the limit; --quotas
                    shows only this section
 
---flavors and --quotas can be combined to show both sections.
+--flavors, --quotas, --security-groups, --networks, and --keypairs narrow
+the output to those sections, and can be combined.
 """
 
 import argparse
@@ -405,9 +406,18 @@ def main():
     parser.add_argument("--json", action="store_true",
                         help="print JSON instead of tables")
     parser.add_argument("--flavors", action="store_true",
-                        help="show only flavors (combine with --quotas for both)")
+                        help="show only flavors (combine with others for more)")
+    parser.add_argument("--security-groups", dest="security_groups",
+                        action="store_true",
+                        help="show only security groups (combine with others for more)")
+    parser.add_argument("--networks", dest="networks",
+                        action="store_true",
+                        help="show only networks (combine with others for more)")
+    parser.add_argument("--keypairs", dest="keypairs",
+                        action="store_true",
+                        help="show only keypairs (combine with others for more)")
     parser.add_argument("--quotas", action="store_true",
-                        help="show only quota usage (combine with --flavors for both)")
+                        help="show only quota usage (combine with others for more)")
     parser.add_argument(
         "--warn-percent", type=int, default=80, metavar="N",
         help="flag a quota LOW at N%% used (default: %(default)s)")
@@ -423,9 +433,11 @@ def main():
     except (AttributeError, openstack.exceptions.SDKException):
         project_name = ""
 
-    # --flavors / --quotas narrow the output to those sections; with neither,
-    # every section is shown.
-    only = {name for name in ("flavors", "quotas") if getattr(args, name)}
+    # --flavors / --security-groups / --networks / --keypairs / --quotas
+    # narrow the output to those sections; with none, every section is shown.
+    only = {name for name in ("flavors", "security_groups", "networks",
+                              "keypairs", "quotas")
+            if getattr(args, name)}
     show_all = not only
 
     facts = {"project": {"name": project_name, "id": project_id,
@@ -434,9 +446,11 @@ def main():
         facts["images"] = gather_images(conn, project_id)
     if show_all or "flavors" in only:
         facts["flavors"] = gather_flavors(conn, project_id)
-    if show_all:
+    if show_all or "security_groups" in only:
         facts["security_groups"] = gather_security_groups(conn, project_id)
+    if show_all or "networks" in only:
         facts["networks"] = gather_networks(conn, project_id)
+    if show_all or "keypairs" in only:
         facts["keypairs"] = gather_keypairs(conn)
     if show_all or "quotas" in only:
         facts["quotas"] = gather_quotas(conn, project_id, args.warn_percent)
@@ -459,8 +473,10 @@ def main():
     if "security_groups" in facts:
         print_table("Security groups", facts["security_groups"],
                     ["name", "id", "access", "rules", "description"])
+    if "networks" in facts:
         print_table("Networks", facts["networks"],
                     ["name", "id", "access", "status", "subnets"])
+    if "keypairs" in facts:
         print_table("Keypairs (per user, not per project)", facts["keypairs"],
                     ["name", "type", "fingerprint"])
     if "quotas" in facts:

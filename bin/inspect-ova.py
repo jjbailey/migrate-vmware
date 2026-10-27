@@ -216,7 +216,7 @@ def main():
     try:
         inspector = inspect_ova if args.ova else inspect_ovf
         print(json.dumps(inspector(path), indent=2, sort_keys=False))
-    except (OSError, tarfile.TarError, ET.ParseError, ValueError) as error:
+    except (OSError, tarfile.TarError, ET.ParseError, ValueError, KeyError) as error:
         raise SystemExit(f"inspect-ova: {error}")
 
 if __name__ == "__main__":

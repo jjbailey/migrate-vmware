@@ -116,7 +116,6 @@
   loop: "{{ gcp_cleanup_running_imports | default([]) }}"
   loop_control:
     label: "{{ item.image }}"
-  register: gcp_cleanup_cancel
   failed_when: false
   no_log: true
   when:

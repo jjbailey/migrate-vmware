@@ -5,7 +5,8 @@
 # Installed via: ansible-galaxy collection install -r requirements.yml
 # Pinned because module parameter names and return value shapes can change
 # across collection releases; existing workflows are verified against these versions.
-# azure.azcollection is included for setup only; no Azure workflow uses it yet.
+# Only collections a shipped workflow actually uses are listed, so
+# tests/validate.sh requires exactly what this repository needs.
 # community.vmware 5.10.0 is intentionally retained with ansible-core 2.18.
 # The current 6.3.0 release requires ansible-core 2.19+ and its snapshot module
 # is deprecated, so upgrade that pair together after migrating to vmware.vmware.
@@ -17,5 +18,11 @@ collections:
     version: "5.10.0"
   - name: openstack.cloud
     version: "2.6.0"
-  - name: azure.azcollection
-    version: "3.21.0"
+
+# azure.azcollection 3.21.0 is deliberately not required yet. vaults/azure.yml
+# and bin/azure-vault.sh are reserved for the in-progress Azure work, which has
+# no playbook or wrapper, so nothing here may depend on the collection. Install
+# it separately (and restore this pin and the README prerequisites) when the
+# Azure workflow lands.
+#  - name: azure.azcollection
+#    version: "3.21.0"

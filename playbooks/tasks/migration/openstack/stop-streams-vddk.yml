@@ -14,7 +14,9 @@
 # overwrite them.
 #
 # A pidfile may be stale and its pid reused, so a pid is only signalled while
-# its command line still names this disk's socket.
+# its command line still names this disk's socket. The password file is removed
+# here too: the conversion shell deletes it on EXIT, but a killed controller
+# never gets there, and this task is what a later resume or discard runs first.
 
 - name: Find the running disk streams
   ansible.builtin.find:
@@ -55,4 +57,26 @@
   when:
     - openstack_vddk_socket_dir is defined
     - not (migration_succeeded | default(false) | bool)
+
+- name: Find vCenter password files left in the socket directory
+  ansible.builtin.find:
+    paths: "{{ openstack_vddk_socket_dir }}"
+    patterns: "password-*"
+  register: openstack_vddk_password_files
+  when:
+    - openstack_vddk_socket_dir is defined
+    - not (migration_succeeded | default(false) | bool)
+
+- name: Remove vCenter password files a killed conversion left behind
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ openstack_vddk_password_files.files | default([]) | map(attribute='path') }}"
+  loop_control:
+    label: "{{ item | basename }}"
+  when:
+    - openstack_vddk_socket_dir is defined
+    - not (migration_succeeded | default(false) | bool)
+  register: openstack_vddk_password_removed
+  failed_when: false
 

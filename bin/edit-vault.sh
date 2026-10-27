@@ -4,7 +4,7 @@
 
 # Edit (or create) one encrypted vault file.
 #
-# The per-target entry points -- aws-vault.sh, gcp-vault.sh,
+# The per-target entry points -- aws-vault.sh, azure-vault.sh, gcp-vault.sh,
 # openstack-vault.sh, vsphere-vault.sh -- are symlinks to this
 # script; the name it was invoked as selects vaults/<target>.yml. Set VAULT to
 # edit some other file.

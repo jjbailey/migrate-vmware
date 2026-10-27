@@ -97,6 +97,13 @@ radio()
     dlg --radiolist "$title" "$(height 16)" "$COLS" 8 "$@"
 }
 
+checklist()
+{
+    local title=$1
+    shift
+    dlg --separate-output --checklist "$title" "$(height 18)" "$COLS" 10 "$@"
+}
+
 say()
 {
     dlg --msgbox "$1" "$(height "$2")" "$COLS" || true
@@ -161,6 +168,7 @@ for name,stamp in sorted(best.items(), key=lambda item: when(item[1]), reverse=T
     print("%s\t%s" % (name, stamp[:10] or "undated"))' "$platform"
     )
     if [ ${#choices[@]} -eq 0 ] ; then
+        say "No completed ${label} migrations in catalogs/migration-catalog.json.\\n\\nType the VM name manually instead." 10 || true
         input "VM name (as recorded in the migration catalog):" ""
         return
     fi

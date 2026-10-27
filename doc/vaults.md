@@ -2,10 +2,11 @@
 
 ## Editing a Vault
 
-`bin/aws-vault.sh`, `bin/gcp-vault.sh`, `bin/openstack-vault.sh`, and
-`bin/vsphere-vault.sh` wrap `ansible-vault edit`/`create
+`bin/aws-vault.sh`, `bin/azure-vault.sh`, `bin/gcp-vault.sh`,
+`bin/openstack-vault.sh`, and `bin/vsphere-vault.sh` wrap `ansible-vault edit`/`create
 --encrypt-vault-id=default` against the matching file below, creating it if it
-doesn't exist yet:
+doesn't exist yet. `azure-vault.sh` edits the reserved Azure vault; nothing
+else in the repository reads that file yet.
 
 ```sh
 bin/aws-vault.sh
@@ -36,6 +37,9 @@ Select an account with `-e aws_target_project=<key-or-account-id>`. A
 single-entry map is auto-selected. A legacy flat mapping containing
 `aws_region`, `s3_bucket`, and `vmimport_role_name` remains supported.
 
+`bin/aws-project-facts.py` reads `vaults/aws.yml` and selects an account
+the same way the playbooks do (vault key, account ID, or profile).
+
 ## GCP Vault
 
 vaults/gcp.yml
@@ -58,6 +62,9 @@ Select a project with `-e gcp_target_project=<key-or-project-id>`. A
 single-entry map is auto-selected. A legacy flat mapping containing
 `gcp_project`, `gcs_bucket`, `gcp_import_location`, and `service_account_key`
 remains supported.
+
+`bin/gcp-project-facts.py` reads `vaults/gcp.yml` and selects a project
+the same way the playbooks do (vault key, `gcp_project`, or `project_id`).
 
 ### `gcp_import_location`
 
@@ -166,3 +173,11 @@ entry; unset values fall back to the inventory, ssh-agent, or `~/.ssh/config`.
 Each migration catalog row records the selected vCenter key as
 `source_vcenter_key` (or `legacy` for the flat mapping) alongside
 `source_vcenter`, so a row names the vCenter it came from.
+
+## Azure Vault (reserved)
+
+`vaults/azure.yml` and `bin/azure-vault.sh` exist, but no Azure workflow does:
+there is no Azure playbook, wrapper, or task tree, and nothing reads this vault.
+They are reserved for the in-progress Azure work, so the file and its helper are
+ready when that workflow lands. Nothing in the repository requires them, and
+`azure.azcollection` is deliberately not in `requirements.yml` until then.

@@ -55,17 +55,9 @@ The playbooks run directly on the control host using Ansible, `govc`, and
   ```
 
 - Network access from the control host to vCenter and the selected cloud APIs.
-- Ansible, the `amazon.aws`, `community.vmware`, `openstack.cloud`, and
-  `azure.azcollection` collections; `govc`, `gcloud`, the AWS CLI (`aws`), the
-  Azure CLI (`az`), `qemu-img`, and the Python AWS/vSphere libraries. Azure is
-  currently a repository/tooling prerequisite only; there is no Azure migration
-  or launch workflow yet. The pinned
-  [`azure.azcollection` 3.21.0 collection](https://docs.ansible.com/projects/ansible/latest/collections/azure/azcollection/)
-  requires Python 3.10 or newer. Install the Azure CLI separately using Microsoft's
-  [Azure CLI installation guide](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli).
-  The Azure collection's Python requirements are in its installed
-  `requirements.txt` and must be installed into the same Python environment used
-  by Ansible; the One-time Setup section gives the command. The `gcloud` and `aws`
+- Ansible, the `amazon.aws`, `community.vmware`, and `openstack.cloud`
+  collections; `govc`, `gcloud`, the AWS CLI (`aws`), `qemu-img`, and the Python
+  AWS/vSphere libraries. The `gcloud` and `aws`
   CLIs stage the large disk artifacts because both upload in parallel chunks
   and resume a failed part, which the collections' upload modules do not. The control host also needs the Python dependencies
   used by the installed collections, including `boto3`, `pyVmomi`,
@@ -86,6 +78,10 @@ The playbooks run directly on the control host using Ansible, `govc`, and
 - `dialog` or `whiptail` is required only for the interactive dialogs
   (`bin/*-dialog.sh`; see [Interactive Dialogs](#interactive-dialogs)) and
   should be available on `PATH`.
+- Azure is **not supported yet**. `vaults/azure.yml` and `bin/azure-vault.sh`
+  are reserved for in-progress Azure work; there is no Azure playbook, wrapper,
+  or workflow, so nothing here needs the Azure collection or the `az` CLI, and
+  neither is required to validate the repository.
 
 ## Required Privileges
 
@@ -143,21 +139,13 @@ nbdkit --version     # datastore-direct OpenStack migrations
 nbdkit vddk --dump-plugin | grep vddk_library_version   # its faster VixDiskLib backend (recommended)
 gcloud --version     # GCP migrations
 aws --version        # AWS migrations
-az version           # Azure tooling setup; no Azure workflow yet
 command -v dialog || command -v whiptail   # interactive dialogs only
 ```
 
-The Azure collection's Python dependencies must be installed into the same
-Python environment that runs Ansible. With the default Ansible collection
-path, run:
-
-```bash
-python -m pip install -r ~/.ansible/collections/ansible_collections/azure/azcollection/requirements.txt
-```
-
-If you install collections in a custom path, use that path instead. Azure CLI
-authentication and Azure-specific vault values will be documented with the
-Azure workflow when it is added.
+Collections installed outside the default path should be installed into the
+same Python environment that runs Ansible. Azure-specific prerequisites (the
+`az` CLI, the `azure.azcollection` Python requirements, and Azure vault values)
+will be documented with the Azure workflow when it is added.
 
 The vault helpers (`bin/*-vault.sh`) prefer the `ansible-vault` in
 `$DIB7_VENV_BIN` (default `~/.dib7/bin`) and otherwise use the one on `PATH`.
@@ -240,6 +228,7 @@ pipeline. Shared defaults are kept in `playbooks/vars/migration-common.yml`.
   ([SVG](doc/workflow.svg))
 - [doc/datastore-direct.md](doc/datastore-direct.md) - the datastore-direct OpenStack
   migration: how it works, requirements, limits
+- [MAINTENANCE-TERMS.md](MAINTENANCE-TERMS.md) - maintenance and support terms
 - [migrate-vmware presentation](doc/migrate_vmware_presentation.pptx) - project presentation slides
 - [migrate-vmware presentation video](doc/migrate_vmware_presentation.mp4) - recorded video of the project presentation
 
@@ -264,6 +253,8 @@ migrate-vmware/
 │   ├── append-*-catalog.py      # Migration and deployment catalog appenders
 │   ├── reconcile-catalog-*.py   # Removes catalog entries gone from AWS, GCP, or OpenStack
 │   ├── openstack-project-facts.py  # Images, flavors, security groups, networks, keys, quotas for one project
+│   ├── aws-project-facts.py       # Subnets, security groups, keypairs for one AWS account/region
+│   ├── gcp-project-facts.py       # Zones, machine types, networks, subnetworks for one GCP project
 │   ├── inspect-ova.py           # OVA inspection
 │   └── *-vault.sh               # Vault management scripts
 ├── catalogs/                    # Migration and deployment catalogs
@@ -333,7 +324,8 @@ Flavors are listed when enabled and either public or private with access
 granted to the project, smallest first. The `FITS` column says whether one more
 server of that flavor fits the project's remaining instance, core, and RAM
 quota. Run `./bin/openstack-project-facts.py <project> --flavors` to see only
-the flavors; `--flavors --quotas` shows both sections.
+the flavors; `--security-groups`, `--networks`, `--keypairs`, and `--quotas`
+narrow to those sections instead, and can be combined.
 
 The same script ends with the project's quotas as `used/total` for compute
 (instances, cores, RAM, server groups), volumes (count, GB, snapshots,
@@ -737,6 +729,13 @@ What each kind asks:
   optional SSH key for GCP; and IP, MAC, floating IP, security group,
   config-drive, user-data, flavor, key pair, and network choices for OpenStack
   (see [OpenStack Launch Networking](#openstack-launch-networking)).
+  Wherever the cloud API can list valid values, the dialog offers a live
+  picker (backed by `bin/openstack-project-facts.py`,
+  `bin/aws-project-facts.py`, or `bin/gcp-project-facts.py`) with the
+  current value pre-selected. Long single-select lists lead with a
+  `Type manually (skip the list)` row so a known value can be typed without
+  scrolling, and a failed lookup falls back to manual entry instead of
+  aborting.
 
 Target choices are read from the vault with `ansible-vault view`, using
 `VAULT_PASSWORD_FILE` or `~/.ssh/dib-vault-pass`. If the password file or
@@ -779,9 +778,16 @@ BACKEND=curl VM_NAME=my-vm ./bin/migrate-openstack-vm-vddk.sh       # force the 
 ```
 
 It refuses independent, shared, raw-mapped, and encrypted disks before creating
-a snapshot. Changed Block Tracking is not required. See
+a snapshot. Changed Block Tracking is not required. The controller host must be
+Linux: the stream bookkeeping reads `/proc` and relies on POSIX signals. See
 [doc/datastore-direct.md](doc/datastore-direct.md) for how it works, installing
 the `vddk` backend, the limits, and what was tested.
+
+**Resume is unproven here.** Artifact retention, `resume_run_id`, and
+`discard_run_id` are implemented, but a resumed datastore-direct run has not
+been exercised against a real vCenter at this revision (see the doc's "Tested"
+section). Treat `resume_run_id` as experimental until it has been verified in
+your environment; `discard_run_id`, or a fresh run, are the safer options.
 
 ## Staging CentOS 7 Guests for OpenStack
 
@@ -1063,24 +1069,46 @@ secrets flow through `.env` files or unencrypted repository files;
 
 ## Export Artifact Manifest
 
-Each migration inspects the exported OVF descriptor before the artifact is
-uploaded. The resulting manifest records every virtual disk,
-source VMDK path, virtual capacity, populated size when provided, disk format,
-attachment metadata, a stable disk index, and (when available) the
-ordered `source_mac_addresses` captured from vSphere. Disks are ordered by
-boot order: the disk controller's bus number (IDE, SCSI, SATA), then the
-controller, then the unit on it. Disk `index` follows that order, the first
-disk is marked as the only boot candidate, and each disk also records
-`ovf_position`, where the OVF descriptor lists it. The playbooks and
+Each migration records a manifest of the disks it uploads. Both source methods
+produce the same overall shape — `manifest_version`, `artifact_type`, `disks`
+numbered `0..n-1` in boot order with only disk 0 a boot candidate, and a
+`virtual_disk_attachments` list — so the validation, import, catalog, and launch
+stages run unchanged on either. The `artifact_type` and the per-disk fields
+differ by method:
+
+- **OVF export** (`bin/inspect-ova.py`, used by AWS, GCP, and the OVF OpenStack
+  method): `artifact_type` `ovf` or `ova`, and per disk the source VMDK `path`,
+  `capacity_bytes`, `populated_size_bytes` when provided, `format`,
+  `ovf_position` (where the descriptor lists the disk), and the OVF attachment
+  metadata (`disk_id`, `instance_id`, `address_on_parent`, `parent`).
+- **Datastore-direct** (`bin/inspect-vm.py`): `artifact_type` `datastore`, and
+  per disk the datastore `path`, `capacity_bytes`, `thin_provisioned`,
+  `snapshot_chain_depth` (how many parent files the disk has; the `curl` backend
+  refuses a non-zero depth, because it reads each disk as one flat file),
+  `file_size_bytes` (null: the flat file is not measured, the conversion reads
+  the backing), and an attachment keyed by the vSphere `device_key`.
+
+Both record the ordered `source_mac_addresses` captured from vSphere, when
+available, for OpenStack launches that preserve network identity. The
+datastore manifest adds `source_vm_name`, `boot_order_source` (`bootOptions`
+when the VM's configured boot order named a disk, otherwise `controller`), and
+`transfer_backend` (which backend read the disks, so a resume reuses it).
+
+Disks are ordered by boot order: the VM's configured
+`config.bootOptions.bootOrder` first, then the disk controller's bus number
+(IDE, SCSI, SATA), then the controller, then the unit on it. Disk `index`
+follows that order, the first disk is marked as the only boot candidate, and
+each OVF-manifest disk also records `ovf_position`. The playbooks and
 `bin/append-migration-catalog.py` refuse a manifest whose indexes are not
 0..n-1 or whose boot candidate is not disk 0, and AWS additionally requires the
 boot disk's `ovf_position` to be 0 (see above).
 
 The manifest is target-neutral. AWS continues to import the original OVA,
-while OpenStack converts individual OVF VMDKs directly, and the GCP workflow
+OpenStack converts individual OVF VMDKs or streams disks straight from the
+datastore, and the GCP workflow
 uploads the referenced VMDKs to Cloud Storage and imports them through M2VM;
-both workflows then create the boot image and additional attached disks
-appropriate to each platform. AWS imported AMIs receive a `Name` tag matching
+each workflow then creates the boot image and additional attached disks
+appropriate to its platform. AWS imported AMIs receive a `Name` tag matching
 the source VM name; EC2 ImportImage does not expose a separate native AMI-name
 parameter.
 
