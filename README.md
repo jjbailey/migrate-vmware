@@ -250,6 +250,7 @@ migrate-vmware/
 │   ├── inspect-vm.py            # Disk manifest from a source VM (datastore-direct)
 │   ├── enable-cbt.py            # Enables Changed Block Tracking without a power cycle
 │   ├── lookup-migration-*.py    # Migration catalog lookups
+│   ├── list-image-catalog.py    # Browse migrated images across all target platforms
 │   ├── append-*-catalog.py      # Migration and deployment catalog appenders
 │   ├── reconcile-catalog-*.py   # Removes catalog entries gone from AWS, GCP, or OpenStack
 │   ├── openstack-project-facts.py  # Images, flavors, security groups, networks, keys, quotas for one project
@@ -1133,6 +1134,31 @@ gets overwritten, so an older record for the same `vm_name` is still a valid,
 independently deployable AMI and stays in the file. Only an exact rerun of
 the same `import_task_id` replaces its own prior entry. Look here rather than
 scrolling back through playbook output to find an AMI ID.
+
+Browse the migrated images with `bin/list-image-catalog.py` (no cloud credentials
+or API calls needed). It reads this repository's migration catalog by default,
+even when run from another directory, and shows all completed migrations, not
+only the latest for each VM:
+
+```bash
+./bin/list-image-catalog.py
+./bin/list-image-catalog.py --provider openstack --project my-project --region RegionOne
+./bin/list-image-catalog.py --vm-name my-vm --status all
+./bin/list-image-catalog.py --provider aws --project 123456789012 --region eu-west-1
+./bin/list-image-catalog.py --catalog /path/to/migration-catalog.json --json
+```
+
+The report includes migration time and ID, source vCenter/datacenter,
+project/account and region, and the AMI or ordered per-disk images. `--platform`
+is an alias for `--provider`; `--project` matches recorded project names/keys or
+IDs (AWS: account ID or project key). `--region` requires an exact recorded
+region; for GCP it matches the import location, not an instance's zone. Rows
+without that scope do not match a scope filter. `--status` defaults to
+`completed`; use `all` to include every status. Rows are grouped by VM and
+platform with newest migrations first, and `--json` returns the matching full
+rows as a JSON list. This reports catalog contents without modifying them or
+checking whether the images still exist in the cloud; use reconciliation for
+that check.
 
 `playbooks/launch-aws-instance.yml` reads AWS entries in this catalog through
 `bin/lookup-migration-ami.py`, which picks the most recent `status: completed`

@@ -122,6 +122,36 @@ class StreamTests(unittest.TestCase):
                                   capture_output=True, text=True, check=False)
         self.assertEqual(compared.returncode, 0, compared.stdout + compared.stderr)
         self.assertFalse((self.run_dir / "disks" / "disk-0.qcow2.tmp").exists())
+        self.assertFalse((self.sockets / "config-0").exists())
+
+    def test_vddk_passes_two_session_config_to_nbdkit(self):
+        # Capture the real VDDK argv, then serve a local raw file instead:
+        # exercise configuration and conversion without a vCenter or VixDiskLib.
+        raw = self.tmp / "disk.raw"
+        raw.write_bytes(b"\xab" * 1024 * 1024)
+        captured = self.tmp / "nbdkit-args.json"
+        wrapper = self.tmp / "nbdkit-wrapper"
+        wrapper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "args = sys.argv[1:]\n"
+            "config = Path(next(arg.split('=', 1)[1] for arg in args if arg.startswith('config=')))\n"
+            f"Path({str(captured)!r}).write_text(json.dumps({{'args': args, 'config': config.read_text()}}))\n"
+            "plugin = args.index('vddk')\n"
+            f"os.execv({shutil.which('nbdkit')!r}, ['nbdkit', *args[:plugin], 'file', {str(raw)!r}])\n"
+        )
+        wrapper.chmod(0o700)
+
+        result = self.convert(openstack_vddk_local=False,
+                              openstack_vddk_backend_effective="vddk",
+                              openstack_vddk_nbdkit_bin=str(wrapper))
+        self.assertEqual(result["rc"], 0, result["stderr"])
+        invocation = json.loads(captured.read_text())
+        self.assertIn(f"config={self.sockets}/config-0", invocation["args"])
+        self.assertIn("transports=nbdssl", invocation["args"])
+        self.assertEqual(invocation["config"], 'OpenVDDK.nbd.sessions = "2"\n')
+        self.assertEqual((self.sockets / "config-0").stat().st_mode & 0o777, 0o600)
 
     def test_converts_a_compressed_disk(self):
         (self.tmp / "disk.raw").write_bytes(b"\xab" * 1024 * 1024 + bytes(range(256)) * 4096)
@@ -157,6 +187,7 @@ class StreamTests(unittest.TestCase):
         self.assertIn("curl", quoted.lower())
         self.assertIn("127.0.0.1", quoted)
         self.assertFalse((self.run_dir / "disks" / "disk-0.qcow2").exists())
+        self.assertFalse((self.sockets / "config-0").exists())
 
     def start_nbdkit(self, socket, pidfile):
         process = subprocess.Popen(["nbdkit", "-f", "-r", "-U", str(socket), "--pidfile", str(pidfile),

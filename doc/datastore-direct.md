@@ -32,10 +32,10 @@ so the result is a point-in-time image; `quiesce_snapshot` (default true) makes 
 application-consistent where the guest supports it. The source VM is never
 powered off.
 
-| Backend                         | How it reads                                                                                                                            | Needs                                 | Limits                                                                                              |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `vddk` (default when available) | VixDiskLib through nbdkit's `vddk` plugin: vCenter login, ticket, NFC over TLS to the ESXi host, disks opened at the migration snapshot | nbdkit `vddk` plugin and a VixDiskLib | none of the curl limits                                                                             |
-| `curl` (fallback)               | each `-flat.vmdk` file from vCenter's `/folder` endpoint with HTTP Range requests, through nbdkit's `curl` plugin                       | nothing beyond nbdkit                 | flat disks only, no existing snapshots; on VMFS the VM must be powered off; reads zeros too         |
+| Backend                         | How it reads                                                                                                                            | Needs                                 | Limits                                                                                      |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `vddk` (default when available) | VixDiskLib through nbdkit's `vddk` plugin: vCenter login, ticket, NFC over TLS to the ESXi host, disks opened at the migration snapshot | nbdkit `vddk` plugin and a VixDiskLib | none of the curl limits                                                                     |
+| `curl` (fallback)               | each `-flat.vmdk` file from vCenter's `/folder` endpoint with HTTP Range requests, through nbdkit's `curl` plugin                       | nothing beyond nbdkit                 | flat disks only, no existing snapshots; on VMFS the VM must be powered off; reads zeros too |
 
 `openstack_vddk_backend` (wrapper: `BACKEND`) selects `auto` (the default: `vddk`
 when the plugin and library load, else `curl`, with a message saying which of the
@@ -180,6 +180,15 @@ The library tested is `libvixDiskLib.so.8.0.3` from
 VMware's disk library (HotAdd, NBDSSL, and NBD transports; see its site for
 availability). VMware's own VDDK, where you are licensed for it, works the same
 way through `libdir`.
+
+With the OpenVDDK build that supports `OpenVDDK.nbd.sessions`, each disk uses
+**two parallel NFC sessions** over NBD/NBDSSL rather than the library's default
+of one. The conversion task writes `OpenVDDK.nbd.sessions = "2"` to a private
+per-disk configuration file and passes it to nbdkit's VDDK plugin with `config=`.
+This requires the new OpenVDDK library to be installed in the selected `libdir`;
+the playbook does not download or replace it. VMware's library does not implement
+this OpenVDDK-specific setting. The curl fallback and local-file tests are
+unchanged.
 
 ## CBT (Changed Block Tracking)
 

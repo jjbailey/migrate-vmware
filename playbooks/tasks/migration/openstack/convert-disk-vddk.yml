@@ -32,6 +32,19 @@
   when: not (openstack_vddk_local | bool)
   no_log: true
 
+- name: Configure two NFC sessions per disk for OpenVDDK
+  # nbdkit passes this file to VixDiskLib_InitEx. The new OpenVDDK build
+  # reads each NBD/NBDSSL disk over two sessions; VMware's library does not
+  # implement this OpenVDDK-specific key. Keep it out of the curl/file paths.
+  ansible.builtin.copy:
+    content: |
+      OpenVDDK.nbd.sessions = "2"
+    dest: "{{ openstack_vddk_socket_dir }}/config-{{ openstack_convert_disk.index }}"
+    mode: "0600"
+  when:
+    - not (openstack_vddk_local | bool)
+    - openstack_vddk_backend_effective == 'vddk'
+
 - name: Assemble the nbdkit plugin and arguments for this disk
   vars:
     # "[datastore] dir/disk.vmdk" is served as dir/disk-flat.vmdk.
@@ -40,7 +53,8 @@
     openstack_vddk_password_arg: "password=+{{ openstack_vddk_socket_dir }}/password-{{ openstack_convert_disk.index }}"
     openstack_vddk_args_vddk: >-
       {{ (['libdir=' ~ openstack_vddk_libdir] if (openstack_vddk_libdir | length > 0) else [])
-         + ['server=' ~ vcenter_hostname,
+         + ['config=' ~ openstack_vddk_socket_dir ~ '/config-' ~ openstack_convert_disk.index,
+            'server=' ~ vcenter_hostname,
             'user=' ~ vcenter_username,
             openstack_vddk_password_arg,
             'thumbprint=' ~ openstack_vddk_thumbprint,
