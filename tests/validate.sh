@@ -122,87 +122,11 @@ done
 vault_pass="${VAULT_PASSWORD_FILE:-$HOME/.ssh/dib-vault-pass}"
 if [ -n "$vault_files" ] && [ -s "$vault_pass" ] && command -v ansible-vault > /dev/null 2>&1 ; then
     echo "== vault schema =="
-    if python3 - "$vault_pass" << 'PYTHON' ; then
-import subprocess
-import json
-import sys
-
-import yaml
-
-passfile = sys.argv[1]
-
-def load(vault):
-    out = subprocess.run(
-        ["ansible-vault", "decrypt", "--vault-password-file", passfile, "-"],
-        input=open(vault, encoding="utf-8").read(),
-        capture_output=True, text=True, check=True,
-    ).stdout
-    return yaml.safe_load(out)
-
-vsphere = load("vaults/vsphere.yml")
-legacy_ok = all(str(vsphere.get(key) or "").strip()
-                for key in ("vcenter_hostname", "vcenter_username", "vcenter_password"))
-projects = vsphere.get("vsphere_projects") or {}
-if not legacy_ok and not projects:
-    raise SystemExit("vaults/vsphere.yml: neither the legacy flat vcenter_* "
-                     "credentials nor vsphere_projects entries found")
-for name, entry in projects.items():
-    for key in ("vcenter_hostname", "vcenter_username", "vcenter_password"):
-        if not str(entry.get(key) or "").strip():
-            raise SystemExit(f"vaults/vsphere.yml: vsphere_projects[{name!r}] {key} missing or empty")
-
-ostack = load("vaults/openstack.yml")
-projects = ostack.get("openstack_projects") or {}
-legacy = ostack.get("openstack_auth") or {}
-if not projects and not legacy:
-    raise SystemExit("vaults/openstack.yml: neither openstack_projects nor openstack_auth found")
-for name, entry in projects.items():
-    for key in ("auth_url", "username", "password", "project_name"):
-        if not str(entry.get(key) or "").strip():
-            raise SystemExit(f"vaults/openstack.yml: openstack_projects[{name!r}] {key} missing or empty")
-    if str(entry.get("project_name")) != str(name):
-        raise SystemExit(f"vaults/openstack.yml: openstack_projects[{name!r}] project_name disagrees with its key")
-aws = load("vaults/aws.yml")
-aws_projects = aws.get("aws_projects") or {}
-if aws_projects:
-    aws_entries = aws_projects.items()
-else:
-    aws_entries = [("legacy", aws)] if aws.get("aws_region") else []
-if not aws_entries:
-    raise SystemExit("vaults/aws.yml: neither aws_projects nor legacy aws_region found")
-for name, entry in aws_entries:
-    for key in ("aws_region", "s3_bucket", "vmimport_role_name"):
-        if not str(entry.get(key) or "").strip():
-            raise SystemExit(f"vaults/aws.yml: aws_projects[{name!r}] {key} missing or empty")
-    account_id = entry.get("aws_account_id", entry.get("account_id"))
-    if account_id is not None and not str(account_id).strip():
-        raise SystemExit(f"vaults/aws.yml: aws_projects[{name!r}] account ID is empty")
-
-gcp = load("vaults/gcp.yml")
-gcp_projects = gcp.get("gcp_projects") or {}
-if gcp_projects:
-    gcp_entries = gcp_projects.items()
-else:
-    gcp_entries = [("legacy", gcp)] if gcp.get("gcp_project") else []
-if not gcp_entries:
-    raise SystemExit("vaults/gcp.yml: neither gcp_projects nor legacy gcp_project found")
-for name, entry in gcp_entries:
-    for key in ("gcp_project", "gcs_bucket", "gcp_import_location", "service_account_key"):
-        if not str(entry.get(key) or "").strip():
-            raise SystemExit(f"vaults/gcp.yml: gcp_projects[{name!r}] {key} missing or empty")
-    if gcp_projects and str(entry.get("gcp_project")) != str(name):
-        raise SystemExit(f"vaults/gcp.yml: gcp_projects[{name!r}] gcp_project disagrees with its key")
-    try:
-        client_email = json.loads(entry["service_account_key"]).get("client_email")
-    except (TypeError, json.JSONDecodeError) as error:
-        raise SystemExit(f"vaults/gcp.yml: gcp_projects[{name!r}] service_account_key is not valid JSON: {error}")
-    if not str(client_email or "").strip():
-        raise SystemExit(f"vaults/gcp.yml: gcp_projects[{name!r}] service_account_key.client_email missing or empty")
-PYTHON
-    echo "  ok   vault schemas (vsphere/openstack/aws/gcp)"
-else
-    fail "vault schema check failed"
-fi
+    if python3 tests/check_vault_schema.py "$vault_pass" ; then
+        echo "  ok   vault schemas (vsphere/openstack/aws/gcp)"
+    else
+        fail "vault schema check failed"
+    fi
 else
     echo "  skip vault schema check (no vault password or ansible-vault)"
 fi
